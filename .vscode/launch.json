@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug relief_app",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/gpf_triangulation_tests",
+            "args": [],
+            "cwd": "${workspaceFolder}/build",
+            "env": {},
+            "stopOnEntry": false,
+            "preLaunchTask": "Build relief_app",
+            "console": "integratedTerminal"
+        }
+    ]
+}
