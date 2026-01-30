@@ -1,5 +1,4 @@
 #include <cassert>
-#include <cmath>
 #include <vector>
 
 #include "gpf/triangulation.hpp"

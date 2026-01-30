@@ -60,33 +60,6 @@ inline double dot(const double* a, const double* b) noexcept {
   return ori == predicates::Orientation::Zero;
 }
 
-// TODO: incircle predicate is not yet implemented in the predicates library
-// This is a placeholder that uses naive floating-point computation
-[[nodiscard]] inline double incircle_naive(
-    const double* pa,
-    const double* pb,
-    const double* pc,
-    const double* pd) noexcept {
-  // Compute incircle test using determinant method
-  // Returns positive if pd is inside the circumcircle of pa, pb, pc
-  // (assuming pa, pb, pc are in counterclockwise order)
-  const double adx = pa[0] - pd[0];
-  const double ady = pa[1] - pd[1];
-  const double bdx = pb[0] - pd[0];
-  const double bdy = pb[1] - pd[1];
-  const double cdx = pc[0] - pd[0];
-  const double cdy = pc[1] - pd[1];
-
-  const double abdet = adx * bdy - bdx * ady;
-  const double bcdet = bdx * cdy - cdx * bdy;
-  const double cadet = cdx * ady - adx * cdy;
-  const double alift = adx * adx + ady * ady;
-  const double blift = bdx * bdx + bdy * bdy;
-  const double clift = cdx * cdx + cdy * cdy;
-
-  return alift * bcdet + blift * cadet + clift * abdet;
-}
-
 // Mesh type used for triangulation
 using MeshType = gpf::ManifoldMesh<gpf::Empty, gpf::Empty, gpf::Empty, gpf::Empty>;
 
@@ -128,8 +101,6 @@ struct Triangulation {
   std::pair<HalfedgeId, MeshType> triangulate(bool is_horizontal) {
     const std::size_t n_points = points.size() >> 1;
     mesh.new_vertices(n_points);
-    // Reserve edges - approximately 3 edges per vertex for triangulation
-    // Note: ManifoldMesh doesn't have reserve_edges, so we skip this optimization
 
     auto [bdy_hid, _] = div_conq_recurse(0, n_points, is_horizontal);
     return {bdy_hid, std::move(mesh)};
@@ -315,15 +286,21 @@ struct Triangulation {
     while (true) {
       bool left_finished = counterclockwise(lt_vid, lb_vid, rb_vid) <= 0.0;
       bool right_finished = counterclockwise(rb_vid, rt_vid, lb_vid) <= 0.0;
-      if (left_finished && right_finished) break;
+      if (left_finished && right_finished) {
+          break;
+      }
 
       if (!left_finished) {
         HalfedgeId curr_hid = he_prev_twin(left_hid);
         while (true) {
           VertexId apex_vid = he_to_to(curr_hid);
-          if (!apex_vid.valid()) break;
+          if (!apex_vid.valid()) {
+              break;
+          }
 
-          if (incircle(lb_vid, rb_vid, lt_vid, apex_vid) <= 0.0) break;
+          if (incircle(lb_vid, rb_vid, lt_vid, apex_vid) <= 0.0) {
+              break;
+          }
 
           mesh.flip(curr_hid);
           lt_vid = apex_vid;
@@ -336,9 +313,13 @@ struct Triangulation {
         HalfedgeId curr_hid = he_next_twin(right_hid);
         while (true) {
           VertexId apex_vid = he_to_to(curr_hid);
-          if (!apex_vid.valid()) break;
+          if (!apex_vid.valid()) {
+              break;
+          }
 
-          if (incircle(lb_vid, rb_vid, rt_vid, apex_vid) <= 0.0) break;
+          if (incircle(lb_vid, rb_vid, rt_vid, apex_vid) <= 0.0) {
+              break;
+          }
 
           mesh.flip(curr_hid);
           rt_vid = apex_vid;
@@ -421,8 +402,8 @@ struct Triangulation {
 
   // Compare vertices
   [[nodiscard]] int cmp(VertexId va, VertexId vb, bool is_horizontal) const {
-    const double* pa = point<2>(points, va.idx);
-    const double* pb = point<2>(points, vb.idx);
+    const auto pa = point<2>(points, va.idx);
+    const auto pb = point<2>(points, vb.idx);
     if (is_horizontal) {
       if (pa[0] != pb[0]) return (pa[0] < pb[0]) ? -1 : 1;
       if (pa[1] != pb[1]) return (pa[1] < pb[1]) ? -1 : 1;
@@ -473,13 +454,8 @@ struct Triangulation {
   }
 
   // Incircle test
-  // TODO: Use proper robust incircle predicate when available
   [[nodiscard]] double incircle(VertexId va, VertexId vb, VertexId vc, VertexId vd) const {
-    return incircle_naive(
-        point<2>(points, va.idx),
-        point<2>(points, vb.idx),
-        point<2>(points, vc.idx),
-        point<2>(points, vd.idx));
+      return predicates::incircle(point<2>(points, va.idx), point<2>(points, vb.idx), point<2>(points, vc.idx), point<2>(points, vd.idx));
   }
 };
 
@@ -760,18 +736,14 @@ struct CDT {
         points.data());
   }
 
-  // Incircle for Point2D
-  // TODO: Implement proper incircle for Point2D when available
   [[nodiscard]] predicates::Orientation incircle(VertexId va, VertexId vb, VertexId vc, VertexId vd) const {
-    // Placeholder: use explicit coordinates and naive incircle
-    auto pa = predicates::to_explicit(point_indices[va.idx], points.data());
-    auto pb = predicates::to_explicit(point_indices[vb.idx], points.data());
-    auto pc = predicates::to_explicit(point_indices[vc.idx], points.data());
-    auto pd = predicates::to_explicit(point_indices[vd.idx], points.data());
-    double result = incircle_naive(pa.data(), pb.data(), pc.data(), pd.data());
-    if (result > 0.0) return predicates::Orientation::Positive;
-    if (result < 0.0) return predicates::Orientation::Negative;
-    return predicates::Orientation::Zero;
+    return predicates::incircle(
+        point_indices[va.idx],
+        point_indices[vb.idx],
+        point_indices[vc.idx],
+        point_indices[vd.idx],
+        points.data()
+    );
   }
 
   // Check if face is a ghost (has invalid vertices)
@@ -842,18 +814,15 @@ inline void alternate_axes(const double* points, std::span<VertexId> indices, bo
   if (actual_horizontal) {
     std::nth_element(indices.begin(), indices.begin() + divider, indices.end(),
                      [points](const VertexId& i, const VertexId& j) {
-                       std::size_t ii = i.idx * 2;
-                       std::size_t jj = j.idx * 2;
-                       return std::make_pair(points[ii], points[ii + 1]) <
-                              std::make_pair(points[jj], points[jj + 1]);
+                       return point<2>(points, i.idx) < point<2>(points, j.idx);
                      });
   } else {
     std::nth_element(indices.begin(), indices.begin() + divider, indices.end(),
                      [points](const VertexId& i, const VertexId& j) {
-                       std::size_t ii = i.idx * 2;
-                       std::size_t jj = j.idx * 2;
-                       return std::make_pair(points[ii + 1], -points[ii]) <
-                              std::make_pair(points[jj + 1], -points[jj]);
+                       const auto pa = point<2>(points, i.idx);
+                       const auto pb = point<2>(points, j.idx);
+                       return std::make_pair(pa[1], -pa[0]) <
+                              std::make_pair(pb[1], -pb[0]);
                      });
   }
 
@@ -892,12 +861,12 @@ inline std::pair<HalfedgeId, MeshType> get_triangulated_mesh(
 
   std::sort(sorted_vertices.begin(), sorted_vertices.end(),
             [&points](VertexId i, VertexId j) {
-              const double* pi = point<2>(points, i.idx);
-              const double* pj = point<2>(points, j.idx);
-              return std::make_pair(pi[0], pi[1]) < std::make_pair(pj[0], pj[1]);
-            });
+              const auto pi = point<2>(points, i.idx);
+              const auto pj = point<2>(points, j.idx);
+              return pi < pj;
+  });
 
-  alternate_axes(points.data(), std::span<VertexId>(sorted_vertices), is_horizontal);
+  alternate_axes(points.data(), sorted_vertices, is_horizontal);
 
   Triangulation tri(points);
   tri.sorted_vertices = std::move(sorted_vertices);
