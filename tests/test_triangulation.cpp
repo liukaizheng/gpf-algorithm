@@ -132,7 +132,7 @@ test_alternate_axes()
 }
 
 void test_cdt_with_intersections() {
-    const int N = 4;
+    const int N = 60;
     std::vector<double> points;
     points.reserve(N * 2);
 

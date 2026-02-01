@@ -811,7 +811,7 @@ set_boundary_vertex_halfedges(MeshType& mesh, HalfedgeId first_hid)
         if (va.valid()) {
             mesh.vertex_data(va).halfedge = mesh.he_twin(prev_hid);
         }
-        curr_hid = mesh.he_next(mesh.he_twin(curr_hid));
+        curr_hid = mesh.he_next_twin(curr_hid);
     } while (curr_hid != first_hid);
 }
 
