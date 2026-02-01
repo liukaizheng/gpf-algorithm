@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <limits>
 #include <ranges>
 #include <span>
 #include <vector>
@@ -17,22 +16,6 @@ namespace triangulation {
 
 namespace ranges = std::ranges;
 namespace views = std::views;
-
-// Constants
-inline constexpr std::size_t INVALID_IND = std::numeric_limits<std::size_t>::max();
-
-// Helper functions
-[[nodiscard]] inline constexpr std::size_t
-twin_index(std::size_t idx) noexcept
-{
-    return idx ^ 1;
-}
-
-[[nodiscard]] inline constexpr bool
-is_negative(std::size_t mark) noexcept
-{
-    return (mark & 1) != 0;
-}
 
 inline double
 dot(const double* a, const double* b) noexcept
@@ -60,21 +43,17 @@ is_zero(predicates::Orientation ori) noexcept
 }
 
 // Mesh type used for triangulation
-using MeshType = gpf::ManifoldMesh<gpf::Empty, gpf::Empty, gpf::Empty, gpf::Empty>;
-
-// Forward declarations
-struct Triangulation;
-struct CDT;
 
 // Triangulation struct - implements divide-and-conquer Delaunay triangulation
+template<typename MeshType>
 struct Triangulation
 {
-    std::span<const double> points;
     MeshType mesh;
+    std::span<const double> points;
     std::vector<VertexId> sorted_vertices;
 
     explicit Triangulation(std::span<const double> pts)
-      : points(pts)
+      : points{ pts }
     {
     }
 
@@ -85,12 +64,6 @@ struct Triangulation
         HalfedgeId twin_hid = mesh.he_twin(hid);
         mesh.halfedge_data(hid).vertex = vb;
         mesh.halfedge_data(twin_hid).vertex = va;
-        if (va.valid()) {
-            mesh.vertex_data(va).halfedge = hid;
-        }
-        if (vb.valid()) {
-            mesh.vertex_data(vb).halfedge = twin_hid;
-        }
         return hid;
     }
 
@@ -460,11 +433,19 @@ struct Triangulation
 // Constrained Delaunay Triangulation
 struct CDT
 {
+    struct VertexProp
+    {
+        predicates::Point2D pt;
+    };
+    struct HalfedgeProp
+    {
+        std::size_t mark{ gpf::kInvalidIndex };
+    };
+    using MeshType = ManifoldMesh<VertexProp, HalfedgeProp, gpf::Empty, gpf::Empty>;
+
     std::span<const double> points;
     std::span<const std::size_t> segments;
-    std::vector<predicates::Point2D> point_indices;
     MeshType mesh;
-    std::vector<std::size_t> halfedge_marks;
 
     // Create a new edge between two vertices
     [[nodiscard]] HalfedgeId new_edge_by_vertices(VertexId va, VertexId vb)
@@ -488,24 +469,6 @@ struct CDT
         if (vid.valid()) {
             mesh.vertex_data(vid).halfedge = hid;
         }
-    }
-
-    // Get he_to_to
-    [[nodiscard]] VertexId he_to_to(HalfedgeId hid) const { return mesh.he_to(mesh.he_next(hid)); }
-
-    // Get he_prev_twin
-    [[nodiscard]] HalfedgeId he_prev_twin(HalfedgeId hid) const { return mesh.he_prev(mesh.he_twin(hid)); }
-
-    // Get he_next_twin
-    [[nodiscard]] HalfedgeId he_next_twin(HalfedgeId hid) const { return mesh.he_next(mesh.he_twin(hid)); }
-
-    // Get he_twin_next
-    [[nodiscard]] HalfedgeId he_twin_next(HalfedgeId hid) const { return mesh.he_twin(mesh.he_next(hid)); }
-
-    // Get halfedge vertices
-    [[nodiscard]] std::array<VertexId, 2> he_vertices(HalfedgeId hid) const
-    {
-        return { mesh.he_from(hid), mesh.he_to(hid) };
     }
 
     // Perform CDT
@@ -546,28 +509,28 @@ struct CDT
         }
 
         VertexId va = mesh.he_from(hid);
-        VertexId left_vid = he_to_to(hid);
+        VertexId left_vid = mesh.he_to_to(hid);
 
         predicates::Orientation left_ori = orient(vb, va, left_vid);
         predicates::Orientation right_ori = orient(vb, va, right_vid);
 
         while (!is_positive(left_ori) && !is_positive(right_ori)) {
-            hid = he_twin_next(hid);
+            hid = mesh.he_twin_next(hid);
             left_ori = right_ori;
             right_vid = mesh.he_to(hid);
             right_ori = orient(vb, va, right_vid);
         }
 
         while (is_negative_ori(right_ori) || is_positive(left_ori)) {
-            hid = he_prev_twin(hid);
+            hid = mesh.he_prev_twin(hid);
             right_ori = left_ori;
-            left_vid = he_to_to(hid);
+            left_vid = mesh.he_to_to(hid);
             left_ori = orient(vb, va, left_vid);
         }
 
         bool collinear = false;
         if (is_zero(left_ori)) {
-            hid = he_prev_twin(hid);
+            hid = mesh.he_prev_twin(hid);
             collinear = true;
         } else if (is_zero(right_ori)) {
             collinear = true;
@@ -583,7 +546,7 @@ struct CDT
             }
         } else {
             HalfedgeId split_hid = mesh.he_next(hid);
-            if (halfedge_marks[split_hid.idx] == INVALID_IND) {
+            if (mesh.halfedge_prop(split_hid).mark == kInvalidIndex) {
                 return hid;
             } else {
                 auto [_, new_hid] = split_edge(split_hid, mark);
@@ -602,7 +565,7 @@ struct CDT
         while (true) {
             VertexId top_vid = mesh.he_from(flip_hid);
             if (top_vid == vb) {
-                HalfedgeId fixup_hid = he_twin_next(flip_hid);
+                HalfedgeId fixup_hid = mesh.he_twin_next(flip_hid);
                 fixup(flip_hid, false);
                 fixup(fixup_hid, true);
                 set_edge_mark(flip_hid, twin_index(mark));
@@ -611,27 +574,27 @@ struct CDT
 
             predicates::Orientation ori = orient(va, vb, top_vid);
             if (is_zero(ori)) {
-                HalfedgeId fixup_hid = he_twin_next(flip_hid);
+                HalfedgeId fixup_hid = mesh.he_twin_next(flip_hid);
                 fixup(flip_hid, false);
                 fixup(fixup_hid, true);
                 set_edge_mark(flip_hid, twin_index(mark));
 
-                HalfedgeId scout_hid = scout_segment(he_prev_twin(flip_hid), vb, mark);
+                HalfedgeId scout_hid = scout_segment(mesh.he_prev_twin(flip_hid), vb, mark);
                 if (mesh.he_from(scout_hid) != vb) {
                     constrain(scout_hid, vb, mark);
                 }
                 break;
             } else {
                 if (is_positive(ori)) {
-                    HalfedgeId fixup_hid = he_twin_next(flip_hid);
+                    HalfedgeId fixup_hid = mesh.he_twin_next(flip_hid);
                     fixup(fixup_hid, true);
                     flip_hid = mesh.he_prev(flip_hid);
                 } else {
                     fixup(flip_hid, false);
-                    flip_hid = he_twin_next(flip_hid);
+                    flip_hid = mesh.he_twin_next(flip_hid);
                 }
 
-                if (halfedge_marks[flip_hid.idx] != INVALID_IND) {
+                if (mesh.halfedge_prop(flip_hid).mark != kInvalidIndex) {
                     auto [new_hid1, new_hid2] = split_edge(flip_hid, mark);
                     fixup(mesh.he_twin(new_hid1), false);
                     fixup(mesh.he_next(new_hid1), true);
@@ -651,17 +614,17 @@ struct CDT
     void fixup(HalfedgeId hid, bool left_side)
     {
         HalfedgeId flip_hid = mesh.he_next(hid);
-        if (halfedge_marks[flip_hid.idx] != INVALID_IND)
+        if (mesh.halfedge_prop(flip_hid).mark != kInvalidIndex)
             return;
 
         HalfedgeId twin_flip_hid = mesh.he_twin(flip_hid);
 
-        VertexId bottom_vid = he_to_to(twin_flip_hid);
+        VertexId bottom_vid = mesh.he_to_to(twin_flip_hid);
         if (!bottom_vid.valid())
             return;
 
         VertexId top_vid = mesh.he_from(hid);
-        auto [left_vid, right_vid] = he_vertices(flip_hid);
+        auto [left_vid, right_vid] = mesh.he_vertices(flip_hid);
 
         if (left_side) {
             if (!is_positive(orient(top_vid, left_vid, bottom_vid)))
@@ -687,23 +650,22 @@ struct CDT
         HalfedgeId twin_hid = mesh.he_twin(hid);
         FaceId fid = mesh.he_face(hid);
         FaceId twin_fid = mesh.he_face(twin_hid);
-        VertexId bottom_vid = he_to_to(hid);
-        VertexId top_vid = he_to_to(twin_hid);
+        VertexId bottom_vid = mesh.he_to_to(hid);
+        VertexId top_vid = mesh.he_to_to(twin_hid);
 
         VertexId left_vid = mesh.he_to(hid);
 
-        std::size_t edge_mark = halfedge_marks[hid.idx];
-        assert(edge_mark != INVALID_IND);
+        std::size_t edge_mark = mesh.halfedge_prop(hid).mark;
+        assert(edge_mark != kInvalidIndex);
 
         VertexId new_vid = mesh.split_edge(mesh.he_edge(hid));
 
         const std::size_t* vab = &segments[(input_mark >> 1) << 1];
         const std::size_t* vcd = &segments[(edge_mark >> 1) << 1];
 
-        point_indices.emplace_back(predicates::ImplicitPointSSI(vab[0], vab[1], vcd[0], vcd[1]));
+        mesh.vertex_prop(new_vid).pt = predicates::ImplicitPointSSI(vab[0], vab[1], vcd[0], vcd[1]);
 
         HalfedgeId new_hid = mesh.v_halfedge(new_vid);
-        new_edge_callback(new_hid);
 
         if (mesh.he_to(new_hid) == left_vid) {
             set_edge_mark(new_hid, edge_mark);
@@ -712,40 +674,35 @@ struct CDT
         }
 
         HalfedgeId new_hid1 = mesh.split_face(fid, bottom_vid, new_vid);
-        new_edge_callback(new_hid1);
         set_edge_mark(new_hid1, input_mark);
 
         HalfedgeId new_hid2 = mesh.split_face(twin_fid, new_vid, top_vid);
-        new_edge_callback(new_hid2);
 
         return { new_hid1, new_hid2 };
-    }
-
-    // Edge callback for new edges
-    void new_edge_callback(HalfedgeId new_hid)
-    {
-        if (new_hid.idx >= halfedge_marks.size()) {
-            halfedge_marks.resize(halfedge_marks.size() + 2, INVALID_IND);
-        }
     }
 
     // Set edge mark
     void set_edge_mark(HalfedgeId hid, std::size_t mark)
     {
-        halfedge_marks[hid.idx] = mark;
-        halfedge_marks[mesh.he_twin(hid).idx] = twin_index(mark);
+        auto he = mesh.halfedge(hid);
+        he.prop().mark = mark;
+        he.twin().prop().mark = gpf::twin_index(mark);
     }
 
     // Orient2d for Point2D
     [[nodiscard]] predicates::Orientation orient(VertexId va, VertexId vb, VertexId vc) const
     {
-        return predicates::orient2d(point_indices[va.idx], point_indices[vb.idx], point_indices[vc.idx], points.data());
+        return predicates::orient2d(
+          mesh.vertex_prop(va).pt, mesh.vertex_prop(vb).pt, mesh.vertex_prop(vc).pt, points.data());
     }
 
     [[nodiscard]] predicates::Orientation incircle(VertexId va, VertexId vb, VertexId vc, VertexId vd) const
     {
-        return predicates::incircle(
-          point_indices[va.idx], point_indices[vb.idx], point_indices[vc.idx], point_indices[vd.idx], points.data());
+        return predicates::incircle(mesh.vertex_prop(va).pt,
+                                    mesh.vertex_prop(vb).pt,
+                                    mesh.vertex_prop(vc).pt,
+                                    mesh.vertex_prop(vd).pt,
+                                    points.data());
     }
 
     // Check if face is a ghost (has invalid vertices)
@@ -759,7 +716,7 @@ struct CDT
     }
 
     // Extract valid faces (not ghost, respecting constraint winding)
-    [[nodiscard]] std::vector<FaceId> extract_invalid_faces() const
+    [[nodiscard]] std::vector<FaceId> extract_valid_faces() const
     {
         std::vector<FaceId> result;
         result.reserve(mesh.n_faces_capacity());
@@ -783,9 +740,9 @@ struct CDT
 
                 for (const auto& he : mesh.face(curr_fid).halfedges()) {
                     HalfedgeId hid = he.id;
-                    std::size_t mark = halfedge_marks[hid.idx];
+                    std::size_t mark = he.prop().mark;
 
-                    if (mark == INVALID_IND) {
+                    if (mark == kInvalidIndex) {
                         FaceId adj_fid = he.twin().face().id;
                         if (visited[adj_fid.idx])
                             continue;
@@ -795,10 +752,8 @@ struct CDT
                             keep = false;
                         }
                         queue.push_back(adj_fid);
-                    } else {
-                        if (is_negative(halfedge_marks[hid.idx])) {
-                            keep = false;
-                        }
+                    } else if (gpf::is_negative(mark)) {
+                        keep = false;
                     }
                 }
             }
@@ -845,7 +800,8 @@ alternate_axes(const double* points, std::span<VertexId> indices, bool is_horizo
 }
 
 // Set boundary vertex halfedges
-inline void
+template<typename MeshType>
+void
 set_boundary_vertex_halfedges(MeshType& mesh, HalfedgeId first_hid)
 {
     HalfedgeId curr_hid = first_hid;
@@ -860,7 +816,8 @@ set_boundary_vertex_halfedges(MeshType& mesh, HalfedgeId first_hid)
 }
 
 // Get triangulated mesh
-inline std::pair<HalfedgeId, MeshType>
+template<typename MeshType>
+auto
 get_triangulated_mesh(std::span<const double> points, bool is_horizontal)
 {
     const std::size_t n_points = points.size() >> 1;
@@ -875,16 +832,19 @@ get_triangulated_mesh(std::span<const double> points, bool is_horizontal)
 
     alternate_axes(points.data(), sorted_vertices, is_horizontal);
 
-    Triangulation tri(points);
+    Triangulation<MeshType> tri(points);
     tri.sorted_vertices = std::move(sorted_vertices);
     return tri.triangulate(is_horizontal);
 }
+} // namespace triangulation
 
 // Simple triangulation of points
 [[nodiscard]] inline std::vector<std::size_t>
 triangulate_points(std::span<const double> points, bool is_horizontal)
 {
-    auto [_, mesh] = get_triangulated_mesh(points, is_horizontal);
+    auto [_, mesh] =
+      triangulation::get_triangulated_mesh<gpf::ManifoldMesh<gpf::Empty, gpf::Empty, gpf::Empty, gpf::Empty>>(
+        points, is_horizontal);
 
     std::vector<std::size_t> result;
     result.reserve(mesh.n_faces() * 3);
@@ -909,29 +869,23 @@ triangulate_points(std::span<const double> points, bool is_horizontal)
 
 // CDT triangulation
 [[nodiscard]] inline std::vector<std::size_t>
-triangulate1(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
+triangulate_polygon(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
 {
-    auto [bdy_hid, mesh] = get_triangulated_mesh(points, is_horizontal);
+    using namespace triangulation;
+    auto [bdy_hid, mesh] = get_triangulated_mesh<CDT::MeshType>(points, is_horizontal);
     set_boundary_vertex_halfedges(mesh, bdy_hid);
-
-    std::vector<std::size_t> halfedge_marks(mesh.n_halfedges_capacity(), INVALID_IND);
-
-    std::vector<predicates::Point2D> point_indices;
-    point_indices.reserve(mesh.n_vertices_capacity());
-    for (std::size_t i = 0; i < mesh.n_vertices_capacity(); ++i) {
-        point_indices.emplace_back(i);
+    for (auto v : mesh.vertices()) {
+        v.prop().pt = { v.id.idx };
     }
 
     CDT cdt;
     cdt.points = points;
     cdt.segments = segments;
-    cdt.point_indices = std::move(point_indices);
     cdt.mesh = std::move(mesh);
-    cdt.halfedge_marks = std::move(halfedge_marks);
 
     cdt.perform();
 
-    std::vector<FaceId> valid_faces = cdt.extract_invalid_faces();
+    std::vector<FaceId> valid_faces = cdt.extract_valid_faces();
 
     std::vector<std::size_t> result;
     result.reserve(valid_faces.size() * 3);
@@ -948,35 +902,29 @@ triangulate1(std::span<const double> points, std::span<const std::size_t> segmen
 [[nodiscard]] inline std::pair<std::vector<double>, std::vector<std::size_t>>
 triangulate_with_new_points(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
 {
+    using namespace triangulation;
     const std::size_t n_old_points = points.size() >> 1;
-    auto [bdy_hid, mesh] = get_triangulated_mesh(points, is_horizontal);
+    auto [bdy_hid, mesh] = get_triangulated_mesh<CDT::MeshType>(points, is_horizontal);
     set_boundary_vertex_halfedges(mesh, bdy_hid);
-
-    std::vector<std::size_t> halfedge_marks(mesh.n_halfedges_capacity(), INVALID_IND);
-
-    std::vector<predicates::Point2D> point_indices;
-    point_indices.reserve(mesh.n_vertices_capacity());
-    for (std::size_t i = 0; i < mesh.n_vertices_capacity(); ++i) {
-        point_indices.emplace_back(i);
+    for (auto v : mesh.vertices()) {
+        v.prop().pt = { v.id.idx };
     }
 
     CDT cdt;
     cdt.points = points;
     cdt.segments = segments;
-    cdt.point_indices = std::move(point_indices);
     cdt.mesh = std::move(mesh);
-    cdt.halfedge_marks = std::move(halfedge_marks);
 
     cdt.perform();
 
     std::vector<double> new_points;
     for (std::size_t i = n_old_points; i < cdt.mesh.n_vertices_capacity(); ++i) {
-        auto pt = predicates::to_explicit(cdt.point_indices[i], cdt.points.data());
+        auto pt = predicates::to_explicit(cdt.mesh.vertex(VertexId{ i }).prop().pt, cdt.points.data());
         new_points.push_back(pt[0]);
         new_points.push_back(pt[1]);
     }
 
-    std::vector<FaceId> valid_faces = cdt.extract_invalid_faces();
+    std::vector<FaceId> valid_faces = cdt.extract_valid_faces();
 
     std::vector<std::size_t> triangles;
     triangles.reserve(valid_faces.size() * 3);
@@ -994,7 +942,6 @@ triangulate_with_new_points(std::span<const double> points, std::span<const std:
 [[nodiscard]] inline std::pair<std::vector<std::size_t>, std::vector<std::size_t>>
 unique_indices(std::span<const std::size_t> indices)
 {
-    std::size_t count = 0;
     std::unordered_map<std::size_t, std::size_t> map;
     map.reserve(indices.size());
 
@@ -1002,14 +949,7 @@ unique_indices(std::span<const std::size_t> indices)
     result.reserve(indices.size());
 
     for (std::size_t old : indices) {
-        auto it = map.find(old);
-        if (it != map.end()) {
-            result.push_back(it->second);
-        } else {
-            map.emplace(old, count);
-            result.push_back(count);
-            ++count;
-        }
+        result.emplace_back(map.emplace(old, result.size()).first->second);
     }
 
     std::vector<std::size_t> new_to_ori_map(map.size());
@@ -1028,6 +968,7 @@ triangulate_polygon(std::span<const double> points,
                     const double* x,
                     const double* y)
 {
+    using namespace triangulation;
     auto [new_segments, new_to_ori_map] = unique_indices(segments);
 
     std::vector<double> points_2d;
@@ -1041,7 +982,7 @@ triangulate_polygon(std::span<const double> points,
     }
 
     std::vector<std::size_t> triangles =
-      triangulate1(std::span<const double>(points_2d), std::span<const std::size_t>(new_segments), true);
+      triangulate_polygon(std::span<const double>(points_2d), std::span<const std::size_t>(new_segments), true);
 
     std::vector<std::size_t> result;
     result.reserve(triangles.size());
@@ -1075,6 +1016,4 @@ triangulate_polygon_soup(std::span<const double> points,
 
     return { std::move(triangles), std::move(parents) };
 }
-
-} // namespace triangulation
 } // namespace gpf
