@@ -716,7 +716,8 @@ struct CDT
     }
 
     // Extract valid faces (not ghost, respecting constraint winding)
-    [[nodiscard]] std::vector<FaceId> extract_valid_faces() const
+    // n_contour_segments: first n segments are contour (affect inside/outside), rest are inner constraints
+    [[nodiscard]] std::vector<FaceId> extract_valid_faces(std::size_t n_contour_segments) const
     {
         std::vector<FaceId> result;
         result.reserve(mesh.n_faces_capacity());
@@ -742,7 +743,10 @@ struct CDT
                     HalfedgeId hid = he.id;
                     std::size_t mark = he.prop().mark;
 
-                    if (mark == kInvalidIndex) {
+                    // Inner segments (mark index >= n_contour_segments) don't block traversal
+                    bool is_inner_segment = (mark != kInvalidIndex) && ((mark >> 1) >= n_contour_segments);
+
+                    if (mark == kInvalidIndex || is_inner_segment) {
                         FaceId adj_fid = he.twin().face().id;
                         if (visited[adj_fid.idx])
                             continue;
@@ -868,8 +872,12 @@ triangulate_points(std::span<const double> points, bool is_horizontal)
 }
 
 // CDT triangulation
+// n_contour_segments: first n segments are contour (affect inside/outside), rest are inner constraints
 [[nodiscard]] inline std::vector<std::size_t>
-triangulate_polygon(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
+triangulate_polygon(std::span<const double> points,
+                    std::span<const std::size_t> segments,
+                    std::size_t n_contour_segments,
+                    bool is_horizontal)
 {
     using namespace triangulation;
     auto [bdy_hid, mesh] = get_triangulated_mesh<CDT::MeshType>(points, is_horizontal);
@@ -885,7 +893,7 @@ triangulate_polygon(std::span<const double> points, std::span<const std::size_t>
 
     cdt.perform();
 
-    std::vector<FaceId> valid_faces = cdt.extract_valid_faces();
+    std::vector<FaceId> valid_faces = cdt.extract_valid_faces(n_contour_segments);
 
     std::vector<std::size_t> result;
     result.reserve(valid_faces.size() * 3);
@@ -898,9 +906,20 @@ triangulate_polygon(std::span<const double> points, std::span<const std::size_t>
     return result;
 }
 
+// CDT triangulation (backward compatible - all segments are contour)
+[[nodiscard]] inline std::vector<std::size_t>
+triangulate_polygon(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
+{
+    return triangulate_polygon(points, segments, segments.size() / 2, is_horizontal);
+}
+
 // CDT with new intersection points
+// n_contour_segments: first n segments are contour (affect inside/outside), rest are inner constraints
 [[nodiscard]] inline std::pair<std::vector<double>, std::vector<std::size_t>>
-triangulate_with_new_points(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
+triangulate_with_new_points(std::span<const double> points,
+                            std::span<const std::size_t> segments,
+                            std::size_t n_contour_segments,
+                            bool is_horizontal)
 {
     using namespace triangulation;
     const std::size_t n_old_points = points.size() >> 1;
@@ -924,7 +943,7 @@ triangulate_with_new_points(std::span<const double> points, std::span<const std:
         new_points.push_back(pt[1]);
     }
 
-    std::vector<FaceId> valid_faces = cdt.extract_valid_faces();
+    std::vector<FaceId> valid_faces = cdt.extract_valid_faces(n_contour_segments);
 
     std::vector<std::size_t> triangles;
     triangles.reserve(valid_faces.size() * 3);
@@ -936,6 +955,13 @@ triangulate_with_new_points(std::span<const double> points, std::span<const std:
     }
 
     return { std::move(new_points), std::move(triangles) };
+}
+
+// CDT with new intersection points (backward compatible - all segments are contour)
+[[nodiscard]] inline std::pair<std::vector<double>, std::vector<std::size_t>>
+triangulate_with_new_points(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
+{
+    return triangulate_with_new_points(points, segments, segments.size() / 2, is_horizontal);
 }
 
 // Helper: unique indices deduplication
