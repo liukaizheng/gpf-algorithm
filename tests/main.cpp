@@ -2,6 +2,8 @@
 #include <iostream>
 
 void
+test_triangulate_bug1();
+void
 test_triangulate_points_simple();
 void
 test_triangulate_points_square();
@@ -14,6 +16,7 @@ void test_cdt_with_intersections();
 int
 main()
 {
+    test_triangulate_bug1();
     test_cdt_with_intersections();
     test_triangulate_10000_random_points();
     test_triangulate_points_simple();

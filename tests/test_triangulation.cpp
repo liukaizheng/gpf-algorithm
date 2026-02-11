@@ -21,6 +21,30 @@ write_obj(const std::string& name, const std::vector<double>& points, const std:
 }
 
 void
+test_triangulate_bug1() {
+    std::vector<double> points {
+        0.43336197097855234,
+        0.43336197097855234,
+        0.32502147823393557,
+        0.32502147823393557,
+        0.0,
+        0.0,
+        0.65004295646789778,
+        0.0,
+        1.0395797536276792,
+        0.0,
+        1.0395797536276792,
+        0.43336197097858076,
+        1.0395797536276792,
+        1.0395797536276916
+    };
+    auto triangles = gpf::triangulate_points(points, true);
+    write_obj("bug1.obj", points, triangles);
+    // auto triangles = gpf::triangulate_polygon(points, std::vector<std::size_t>{0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 0}, 6);
+    const auto a = 2;
+}
+
+void
 test_triangulate_10000_random_points()
 {
     const int N = 10000;
