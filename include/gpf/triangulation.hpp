@@ -685,8 +685,11 @@ struct CDT
     void set_edge_mark(HalfedgeId hid, std::size_t mark)
     {
         auto he = mesh.halfedge(hid);
-        he.prop().mark = mark;
-        he.twin().prop().mark = gpf::twin_index(mark);
+        auto& he_prop = he.prop();
+        if (he_prop.mark == kInvalidIndex) {
+            he_prop.mark = mark;
+            he.twin().prop().mark = gpf::twin_index(mark);
+        }
     }
 
     // Orient2d for Point2D
