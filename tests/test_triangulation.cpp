@@ -5,7 +5,7 @@
 #include <random>
 #include <vector>
 
-#include "gpf/triangulation.hpp"
+#include <gpf/triangulation.hpp>
 
 void
 write_obj(const std::string& name, const std::vector<double>& points, const std::vector<std::size_t>& triangles)

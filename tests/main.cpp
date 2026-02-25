@@ -14,6 +14,7 @@ test_triangulate_points_pentagon();
 void
 test_triangulate_10000_random_points();
 void test_cdt_with_intersections();
+void test_property_edge_length_updates();
 
 int
 main()
@@ -25,7 +26,8 @@ main()
     test_triangulate_points_simple();
     test_triangulate_points_square();
     test_triangulate_points_pentagon();
+    test_property_edge_length_updates();
 
-    std::cout << "gpf_triangulation_tests: OK\n";
+    std::cout << "gpf_algorithm_tests: OK\n";
     return EXIT_SUCCESS;
 }
