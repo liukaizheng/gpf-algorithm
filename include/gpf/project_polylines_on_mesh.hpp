@@ -3,7 +3,6 @@
 #include <functional>
 #include <limits>
 #include <numeric>
-#include <predicates/predicates.hpp>
 #include <queue>
 #include <tuple>
 #include <unordered_map>
@@ -16,6 +15,8 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+
+#include <predicates/predicates.hpp>
 
 #include <gpf/mesh.hpp>
 #include <gpf/triangulation.hpp>
@@ -950,22 +951,6 @@ void TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double righ
 
 }
 
-template<typename Mesh>
-void write_mesh1(const std::string& name, const Mesh& mesh) {
-    std::ofstream out(name);
-    for (const auto v : mesh.vertices()) {
-        const auto& pt = v.prop().pt;
-        std::println(out, "v {} {} {}", pt[0], pt[1], pt[2]);
-    }
-    for (const auto f : mesh.faces()) {
-        std::print(out, "f");
-        for (const auto he : f.halfedges()) {
-            std::print(out, " {}", he.to().id.idx + 1);
-        }
-        std::println(out);
-    }
-}
-
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
 auto project_polylines_on_mesh(
     std::vector<std::array<double, 3>>& points,
@@ -1085,7 +1070,6 @@ auto project_polylines_on_mesh(
         auto segment_vertices = segments | std::views::transform(get_vertex_id) | std::ranges::to<std::vector>();
         detail::triangulate_on_face(mesh, fid, {}, ccs, {}, segment_vertices, edge_point_vertices, face_parent_map);
     }
-    write_mesh1("after_triangulate.obj", mesh);
 
     return std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
         std::vector<gpf::HalfedgeId> halfedges;
