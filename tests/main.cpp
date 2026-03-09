@@ -15,10 +15,12 @@ void
 test_triangulate_10000_random_points();
 void test_cdt_with_intersections();
 void test_property_edge_length_updates();
+void test_mesh_edge_collapse1();
 
 int
 main()
 {
+    test_mesh_edge_collapse1();
     test_triangulate_bug2();
     test_triangulate_bug1();
     test_cdt_with_intersections();
