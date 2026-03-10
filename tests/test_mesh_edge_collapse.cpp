@@ -1,13 +1,18 @@
 #include "read_off.hpp"
+#include <algorithm>
 #include <array>
 #include <gpf/detail.hpp>
+#include <gpf/ids.hpp>
 #include <gpf/surface_mesh.hpp>
 #include <gpf/mesh_property.hpp>
 #include <gpf/mesh_upkeep.hpp>
 #include <fstream>
 #include <iomanip>
 #include <queue>
+#include <utility>
 #include <vector>
+
+#include <Eigen/Dense>
 
 template <typename Mesh>
 void write_off(const std::string& path, const std::vector<std::array<double, 3>>& vertices, const Mesh& mesh) {
@@ -37,6 +42,109 @@ void write_off(const std::string& path, const std::vector<std::array<double, 3>>
         }
     }
 }
+template <typename Mesh>
+void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
+    using namespace gpf;
+    std::array<HalfedgeId, 3> tri_halfedges;
+    std::array<double, 3> tri_edge_lengths;
+    auto get_metric = [&mesh, &tri_halfedges, &tri_edge_lengths, tol](const gpf::FaceId fid) {
+        auto face = mesh.face(fid);
+        if (mesh.face_is_deleted(face.id)) {
+            return std::make_pair(HalfedgeId{}, 0.0);
+        }
+        auto ha = face.halfedge();
+        auto hb = ha.next();
+        auto hc = hb.next();
+        tri_halfedges[0] = ha.id;
+        tri_halfedges[1] = hb.id;
+        tri_halfedges[2] = hc.id;
+
+        tri_edge_lengths[0] = ha.edge().prop().len;
+        tri_edge_lengths[1] = hb.edge().prop().len;
+        tri_edge_lengths[2] = hc.edge().prop().len;
+        if (tri_edge_lengths[0] < tol || tri_edge_lengths[1] < tol || tri_edge_lengths[2] < tol) {
+            return std::make_pair(HalfedgeId{}, 0.0);
+        }
+        std::size_t max_idx = 0;
+        for (std::size_t i = 1; i < 3; ++i) {
+            if (tri_edge_lengths[i] > tri_edge_lengths[max_idx]) {
+                max_idx = i;
+            }
+        }
+        return std::make_pair(tri_halfedges[max_idx], tri_edge_lengths[(max_idx + 1) % 3] + tri_edge_lengths[(max_idx + 2) % 3] - tri_edge_lengths[max_idx]);
+    };
+
+    std::queue<std::pair<gpf::HalfedgeId, double>> queue;
+    for (auto face : mesh.faces()) {
+        auto pair = get_metric(face.id);
+        if (pair.first.valid() && pair.second < 2.0 * tol) {
+            queue.push(std::move(pair));
+        }
+    }
+
+    while (!queue.empty()) {
+        auto old_pair = queue.front();
+        queue.pop();
+        auto curr_pair = get_metric(mesh.he_face(old_pair.first));
+        if (old_pair != curr_pair) {
+            continue;
+        }
+
+        auto he_ab = curr_pair.first;
+        auto vb = mesh.he_to(he_ab);
+        auto he_bc = mesh.he_next(he_ab);
+        auto vc = mesh.he_to(he_bc);
+        auto he_ca = mesh.he_next(he_bc);
+        auto va = mesh.he_to(he_ca);
+
+        auto pa = Eigen::Vector3d::Map(mesh.vertex_prop(va).pt.data());
+        auto pb = Eigen::Vector3d::Map(mesh.vertex_prop(vb).pt.data());
+        auto pc = Eigen::Vector3d::Map(mesh.vertex_prop(vc).pt.data());
+        auto dir = (pb - pa).eval();
+        dir /= mesh.edge_prop(mesh.he_edge(curr_pair.first)).len;
+
+        auto d1 = std::abs((pc - pa).dot(dir));
+        auto d2 = std::abs((pc - pb).dot(dir));
+        auto t = d1 / (d2 + d1);
+        std::array<double, 3> pd{};
+        auto pd_ref = Eigen::Vector3d::Map(pd.data());
+        pd_ref = pa * (1.0 - t) + pb * t;
+
+        if ((pc - pd_ref).norm() > tol) {
+            auto len = (pc - pd_ref).norm();
+            continue;
+        }
+
+        gpf::VertexId target_vid{};
+        gpf::EdgeId collpase_eid{};
+        if (mesh.halfedge(he_ca).edge().prop().len < mesh.halfedge(he_bc).edge().prop().len) {
+            target_vid = va;
+            collpase_eid = mesh.he_edge(he_ca);
+        } else {
+            target_vid = vb;
+            collpase_eid = mesh.he_edge(he_bc);
+        }
+
+        for (auto e : mesh.vertex(vc).edges()) {
+            e.prop().need_update = true;
+        }
+
+        mesh.collapse_edge(collpase_eid, target_vid, vc);
+        for (auto e : mesh.vertex(target_vid).edges()) {
+            auto& ep = e.prop();
+            if (ep.need_update) {
+                update_edge_length<3>(e);
+                ep.need_update = false;
+            }
+        }
+        for (auto he : mesh.vertex(target_vid).incoming_halfedges()) {
+            auto pair = get_metric(he.face().id);
+            if (pair.first.valid() && pair.second < 2.0 * tol) {
+                queue.push(std::move(pair));
+            }
+        }
+    }
+}
 
 void test_mesh_edge_collapse1() {
     using namespace gpf;
@@ -54,7 +162,10 @@ void test_mesh_edge_collapse1() {
         v.prop().pt = data.vertices[v.id.idx];
     }
     gpf::update_edge_lengths<3>(mesh);
-    gpf::collapse_short_edges(mesh, 0.02);
+
+    const double tol = 0.02;
+    gpf::collapse_short_edges(mesh, tol);
+    // collapse_degenerate_triangles(mesh, tol);
     write_off("edge_collapsed.off", data.vertices, mesh);
     const auto a = 2;
 }

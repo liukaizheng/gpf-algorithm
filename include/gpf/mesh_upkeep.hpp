@@ -1,6 +1,10 @@
-#include <gpf/mesh_property.hpp>
+#include <array>
+#include <limits>
 #include <queue>
+
 #include <gpf/mesh.hpp>
+#include <gpf/mesh_property.hpp>
+
 namespace gpf {
 template <typename Mesh>
 void collapse_short_edges(Mesh& mesh, const double tol) {
@@ -16,13 +20,12 @@ void collapse_short_edges(Mesh& mesh, const double tol) {
         if (mesh.edge_is_deleted(eid) || mesh.edge_prop(eid).len != len) {
             continue;
         }
-        auto vb = mesh.edge(eid).halfedge().to();
-        for (auto e : vb.edges()) {
+        const auto [va, vb] = mesh.e_vertices(eid);
+        for (auto e : mesh.vertex(vb).edges()) {
             e.prop().need_update = true;
         }
 
-
-        auto va = mesh.collapse_edge(eid);
+        mesh.collapse_edge(eid, va, vb);
         for (auto e : mesh.vertex(va).edges()) {
             auto& ep = e.prop();
             if (ep.need_update) {
