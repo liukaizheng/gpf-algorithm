@@ -1,5 +1,6 @@
-#include <gpf/ids.hpp>
 #include <queue>
+#include <unordered_set>
+#include <algorithm>
 
 #include <gpf/mesh.hpp>
 #include <gpf/mesh_property.hpp>
@@ -13,6 +14,8 @@ void collapse_short_edges(Mesh& mesh, const double tol) {
             queue.emplace(edge.prop().len, edge.id);
         }
     }
+
+    std::unordered_set<VertexId> vb_oppo_vertices;
     while (!queue.empty()) {
         auto [len, eid] = queue.top();
         queue.pop();
@@ -20,6 +23,33 @@ void collapse_short_edges(Mesh& mesh, const double tol) {
             continue;
         }
         const auto [va, vb] = mesh.e_vertices(eid);
+        vb_oppo_vertices.clear();
+        for (auto e : mesh.vertex(vb).edges()) {
+            auto [v1, v2] = mesh.e_vertices(e.id);
+            if (v1 == vb) {
+                vb_oppo_vertices.emplace(v2);
+            } else {
+                assert(v2 == vb);
+                vb_oppo_vertices.emplace(v1);
+            }
+        }
+
+        if (std::ranges::any_of(mesh.vertex(va).edges(), [&mesh, &vb_oppo_vertices, va, eid](auto e) {
+            auto [v1, v2] = mesh.e_vertices(e.id);
+            const VertexId va_oppo = v1 == va ? v2 : v1;
+            if (vb_oppo_vertices.contains(va_oppo)) {
+                for (const auto he : mesh.edge(eid).halfedges()) {
+                    if (he.next().to().id == va_oppo) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return false;
+        })) {
+            continue;
+        }
+
         for (auto e : mesh.vertex(vb).edges()) {
             e.prop().need_update = true;
         }

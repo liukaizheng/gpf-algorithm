@@ -38,6 +38,9 @@ void write_off(const std::string& path, const std::vector<std::array<double, 3>>
         for (const auto he : f.halfedges()) {
             face_vertices.push_back(he.from().id.idx);
         }
+        if (face_vertices[0] == 8232 && face_vertices[1] == 1254 && face_vertices[2] == 8192) {
+            const auto a = 2;
+        }
         for (std::size_t i = 1; i + 1 < face_vertices.size(); ++i) {
             out << "3 " << face_vertices[0] << ' ' << face_vertices[i] << ' ' << face_vertices[i + 1]
                 << '\n';
@@ -180,6 +183,7 @@ void test_mesh_edge_collapse1() {
     auto data = read_off("interface.off");
     struct VertexProp {
         std::array<double, 3> pt;
+        VertexId merge_to;
     };
     struct EdgeProp {
         double len;
@@ -194,7 +198,20 @@ void test_mesh_edge_collapse1() {
 
     const double tol = 0.02;
     gpf::collapse_short_edges(mesh, tol);
+    /*{
+        gpf::VertexId v1{8192};
+        gpf::VertexId v2{1254};
+        gpf::VertexId v3{8232};
+        auto e1 = mesh.e_from_vertices(v1, v2);
+        auto e2 = mesh.e_from_vertices(v2, v3);
+        auto e3 = mesh.e_from_vertices(v3, v1);
+        auto faces1 = mesh.edge(e1).halfedges() | std::views::transform([](auto h) { return h.face().id.idx; }) | std::ranges::to<std::vector>();
+        auto faces2 = mesh.edge(e2).halfedges() | std::views::transform([](auto h) { return h.face().id.idx; }) | std::ranges::to<std::vector>();
+        auto faces3 = mesh.edge(e3).halfedges() | std::views::transform([](auto h) { return h.face().id.idx; }) | std::ranges::to<std::vector>();
+        const int a = 2;
+    }*/
     write_off("edge_collapsed.off", data.vertices, mesh);
+    write_non_manifold_edges_obj("non_manifold.obj", data.vertices, mesh);
     // collapse_degenerate_triangles(data.vertices, mesh, tol);
     const auto n_queue_cap = static_cast<std::size_t>(mesh.n_edges() * 0.4);
     std::priority_queue<double> pq;
@@ -247,7 +264,6 @@ void test_mesh_edge_collapse1() {
     }
 
 
-    write_non_manifold_edges_obj("non_manifold.obj", data.vertices, mesh);
     for (std::size_t i = data.vertices.size(); i < mesh.n_vertices_capacity(); i++) {
         data.vertices.emplace_back(mesh.vertex_prop(VertexId{i}).pt);
     }
