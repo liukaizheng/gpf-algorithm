@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iomanip>
 #include <queue>
+#include <ranges>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -42,8 +44,32 @@ void write_off(const std::string& path, const std::vector<std::array<double, 3>>
         }
     }
 }
+
 template <typename Mesh>
-void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
+void write_non_manifold_edges_obj(const std::string& path,
+                                  const std::vector<std::array<double, 3>>& vertices,
+                                  const Mesh& mesh) {
+    std::ofstream out(path);
+    out << std::setprecision(17);
+    for (const auto& v : vertices) {
+        out << "v " << v[0] << ' ' << v[1] << ' ' << v[2] << '\n';
+    }
+    for (const auto& e : mesh.edges()) {
+        std::size_t face_count = 0;
+        for (const auto he : e.halfedges()) {
+            if (he.face().id.valid()) {
+                ++face_count;
+            }
+        }
+        if (face_count > 2) {
+            auto [va, vb] = e.vertices();
+            out << "l " << (va.id.idx + 1) << ' ' << (vb.id.idx + 1) << '\n';
+        }
+    }
+}
+
+template <typename Mesh>
+void collapse_degenerate_triangles(const std::vector<std::array<double, 3>>& vertices, Mesh &mesh, const double tol) {
     using namespace gpf;
     std::array<HalfedgeId, 3> tri_halfedges;
     std::array<double, 3> tri_edge_lengths;
@@ -128,6 +154,9 @@ void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
         for (auto e : mesh.vertex(vc).edges()) {
             e.prop().need_update = true;
         }
+        if (collpase_eid.idx == 16847) {
+            write_off("before_collapse.off", vertices, mesh);
+        }
 
         mesh.collapse_edge(collpase_eid, target_vid, vc);
         for (auto e : mesh.vertex(target_vid).edges()) {
@@ -165,7 +194,63 @@ void test_mesh_edge_collapse1() {
 
     const double tol = 0.02;
     gpf::collapse_short_edges(mesh, tol);
-    // collapse_degenerate_triangles(mesh, tol);
     write_off("edge_collapsed.off", data.vertices, mesh);
+    // collapse_degenerate_triangles(data.vertices, mesh, tol);
+    const auto n_queue_cap = static_cast<std::size_t>(mesh.n_edges() * 0.4);
+    std::priority_queue<double> pq;
+    for (const auto e : mesh.edges()) {
+        const auto len = e.prop().len;
+        if (pq.size() < n_queue_cap) {
+            pq.emplace(len);
+        } else if (len < pq.top()) {
+            pq.pop();
+            pq.emplace(len);
+        }
+    }
+    const auto max_edge_len = std::max(5.0, pq.top());
+
+    std::priority_queue<std::pair<double, EdgeId>> queue;
+    for (const auto e : mesh.edges()) {
+        auto edge_len = e.prop().len;
+        if (edge_len > max_edge_len) {
+            queue.emplace(edge_len, e.id);
+        }
+    }
+    while(!queue.empty()) {
+        auto [edge_len, eid] = queue.top();
+        queue.pop();
+        if (edge_len != mesh.edge_prop(eid).len) {
+            continue;
+        }
+
+        auto [va, vb] = mesh.e_vertices(eid);
+        const auto new_vid = mesh.split_edge(eid);
+        Eigen::Vector3d::Map(mesh.vertex_prop(new_vid).pt.data()) = (Eigen::Vector3d::Map(mesh.vertex_prop(va).pt.data()) + Eigen::Vector3d::Map(mesh.vertex_prop(vb).pt.data())) * 0.5;
+
+        auto new_v_he = mesh.vertex(new_vid).halfedge();
+        const auto half_edge_len = edge_len * 0.5;
+        new_v_he.edge().prop().len = half_edge_len;
+        new_v_he.prev().edge().prop().len  = half_edge_len;
+
+        for (auto he : mesh.edge(eid).halfedges()) {
+            auto vc = he.next().to().id;
+            mesh.split_face(he.face().id, new_vid, vc);
+        }
+
+        for (auto e : mesh.vertex(new_vid).edges()) {
+            update_edge_length<3>(e);
+            auto len = e.prop().len;
+            if (len > max_edge_len) {
+                queue.emplace(len, e.id);
+            }
+        }
+    }
+
+
+    write_non_manifold_edges_obj("non_manifold.obj", data.vertices, mesh);
+    for (std::size_t i = data.vertices.size(); i < mesh.n_vertices_capacity(); i++) {
+        data.vertices.emplace_back(mesh.vertex_prop(VertexId{i}).pt);
+    }
+    write_off("split.off", data.vertices, mesh);
     const auto a = 2;
 }
