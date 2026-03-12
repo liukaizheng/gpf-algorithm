@@ -9,10 +9,9 @@
 #include <fstream>
 #include <iomanip>
 #include <queue>
-#include <ranges>
-#include <unordered_set>
 #include <utility>
 #include <vector>
+#include <gpf/project_polylines_on_mesh.hpp>
 
 #include <Eigen/Dense>
 
@@ -178,54 +177,9 @@ void collapse_degenerate_triangles(const std::vector<std::array<double, 3>>& ver
     }
 }
 
-void test_mesh_edge_collapse1() {
+template <typename Mesh>
+void split_long_edges(Mesh& mesh, const double max_edge_len) {
     using namespace gpf;
-    auto data = read_off("interface.off");
-    struct VertexProp {
-        std::array<double, 3> pt;
-        VertexId merge_to;
-    };
-    struct EdgeProp {
-        double len;
-        bool need_update{false};
-    };
-    using Mesh = gpf::SurfaceMesh<VertexProp, Empty, EdgeProp>;
-    auto mesh = Mesh::new_in(data.faces);
-    for (auto v : mesh.vertices()) {
-        v.prop().pt = data.vertices[v.id.idx];
-    }
-    gpf::update_edge_lengths<3>(mesh);
-
-    const double tol = 0.02;
-    gpf::collapse_short_edges(mesh, tol);
-    /*{
-        gpf::VertexId v1{8192};
-        gpf::VertexId v2{1254};
-        gpf::VertexId v3{8232};
-        auto e1 = mesh.e_from_vertices(v1, v2);
-        auto e2 = mesh.e_from_vertices(v2, v3);
-        auto e3 = mesh.e_from_vertices(v3, v1);
-        auto faces1 = mesh.edge(e1).halfedges() | std::views::transform([](auto h) { return h.face().id.idx; }) | std::ranges::to<std::vector>();
-        auto faces2 = mesh.edge(e2).halfedges() | std::views::transform([](auto h) { return h.face().id.idx; }) | std::ranges::to<std::vector>();
-        auto faces3 = mesh.edge(e3).halfedges() | std::views::transform([](auto h) { return h.face().id.idx; }) | std::ranges::to<std::vector>();
-        const int a = 2;
-    }*/
-    write_off("edge_collapsed.off", data.vertices, mesh);
-    write_non_manifold_edges_obj("non_manifold.obj", data.vertices, mesh);
-    // collapse_degenerate_triangles(data.vertices, mesh, tol);
-    const auto n_queue_cap = static_cast<std::size_t>(mesh.n_edges() * 0.4);
-    std::priority_queue<double> pq;
-    for (const auto e : mesh.edges()) {
-        const auto len = e.prop().len;
-        if (pq.size() < n_queue_cap) {
-            pq.emplace(len);
-        } else if (len < pq.top()) {
-            pq.pop();
-            pq.emplace(len);
-        }
-    }
-    const auto max_edge_len = std::max(5.0, pq.top());
-
     std::priority_queue<std::pair<double, EdgeId>> queue;
     for (const auto e : mesh.edges()) {
         auto edge_len = e.prop().len;
@@ -250,7 +204,13 @@ void test_mesh_edge_collapse1() {
         new_v_he.prev().edge().prop().len  = half_edge_len;
 
         for (auto he : mesh.edge(eid).halfedges()) {
-            auto vc = he.next().to().id;
+            VertexId vc{};
+            if (he.to().id == new_vid) {
+                vc = he.next().next().to().id;
+            } else {
+                assert(he.to().id == va || he.to().id == vb);
+                vc = he.next().to().id;
+            }
             mesh.split_face(he.face().id, new_vid, vc);
         }
 
@@ -262,11 +222,92 @@ void test_mesh_edge_collapse1() {
             }
         }
     }
+}
 
+template <typename Mesh>
+void identify_boundary_points(
+    const OffData& boundary_mesh,
+    Mesh& mesh
+) {
+    using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
+    using Point_3 = Kernel::Point_3;
+    using Triangle_3 = Kernel::Triangle_3;
+    using TreeIterator = std::vector<Triangle_3>::const_iterator;
+    using TreePrimitive = CGAL::AABB_triangle_primitive_3<Kernel, TreeIterator>;
+    using TreeTraits = CGAL::AABB_traits_3<Kernel, TreePrimitive>;
+    using Tree = CGAL::AABB_tree<TreeTraits>;
 
+    std::vector<Triangle_3> triangles;
+    triangles.reserve(mesh.n_faces());
+
+    std::array<Point_3, 3> tri;
+    for (const auto& indices: boundary_mesh.faces) {
+        for (std::size_t i = 0; i < std::size_t{3}; ++i) {
+            const auto& p = boundary_mesh.vertices[indices[i]];
+            tri[i] = Point_3(p[0], p[1], p[2]);
+        }
+        triangles.push_back(Triangle_3(tri[0], tri[1], tri[2]));
+    }
+
+    Tree tree(triangles.begin(), triangles.end());
+    tree.accelerate_distance_queries();
+    for (auto v : mesh.vertices()) {
+        const auto& pt = v.prop().pt;
+        Point_3 p(pt[0], pt[1], pt[2]);
+
+        auto closest_ret = tree.closest_point_and_primitive(p);
+        auto sq_dist = (closest_ret.first - p).squared_length();
+        if (sq_dist < 1e-8) {
+            v.prop().on_boundary = true;
+        }
+    }
+}
+
+void test_mesh_edge_collapse1() {
+    using namespace gpf;
+    auto data = read_off("clip_material_1.off");
+    struct VertexProp {
+        std::array<double, 3> pt;
+        bool on_boundary;
+    };
+    struct EdgeProp {
+        double len;
+        bool need_update{false};
+    };
+    using Mesh = gpf::SurfaceMesh<VertexProp, Empty, EdgeProp>;
+    auto mesh = Mesh::new_in(data.faces);
+    for (auto v : mesh.vertices()) {
+        v.prop().pt = data.vertices[v.id.idx];
+    }
+    gpf::update_edge_lengths<3>(mesh);
+    {
+        auto eid = mesh.e_from_vertices(gpf::VertexId{1180}, gpf::VertexId{1182});
+        auto len = mesh.edge_prop(eid).len;
+        const auto a = 2;
+    }
+
+    const double tol = 0.02;
+    // gpf::collapse_short_edges(mesh, tol);
+    // write_off("edge_collapsed.off", data.vertices, mesh);
+    // write_non_manifold_edges_obj("non_manifold.obj", data.vertices, mesh);
+    // collapse_degenerate_triangles(data.vertices, mesh, tol);
+    const auto n_queue_cap = static_cast<std::size_t>(mesh.n_edges() * 0.4);
+    std::priority_queue<double> pq;
+    for (const auto e : mesh.edges()) {
+        const auto len = e.prop().len;
+        if (pq.size() < n_queue_cap) {
+            pq.emplace(len);
+        } else if (len < pq.top()) {
+            pq.pop();
+            pq.emplace(len);
+        }
+    }
+    const auto max_edge_len = std::max(1.0, pq.top());
+    split_long_edges(mesh, max_edge_len);
     for (std::size_t i = data.vertices.size(); i < mesh.n_vertices_capacity(); i++) {
         data.vertices.emplace_back(mesh.vertex_prop(VertexId{i}).pt);
     }
+
     write_off("split.off", data.vertices, mesh);
     const auto a = 2;
 }
