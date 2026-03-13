@@ -48,6 +48,23 @@ void write_off(const std::string& path, const std::vector<std::array<double, 3>>
 }
 
 template <typename Mesh>
+void write_boundary_points_off(const std::string& path, const Mesh& mesh) {
+    std::vector<std::array<double, 3>> boundary_pts;
+    for (const auto& v : mesh.vertices()) {
+        if (v.prop().on_boundary) {
+            boundary_pts.push_back(v.prop().pt);
+        }
+    }
+    std::ofstream out(path);
+    out << "OFF\n";
+    out << boundary_pts.size() << " 0 0\n";
+    out << std::setprecision(17);
+    for (const auto& pt : boundary_pts) {
+        out << pt[0] << ' ' << pt[1] << ' ' << pt[2] << '\n';
+    }
+}
+
+template <typename Mesh>
 void write_non_manifold_edges_obj(const std::string& path,
                                   const std::vector<std::array<double, 3>>& vertices,
                                   const Mesh& mesh) {
@@ -71,7 +88,7 @@ void write_non_manifold_edges_obj(const std::string& path,
 }
 
 template <typename Mesh>
-void collapse_degenerate_triangles(const std::vector<std::array<double, 3>>& vertices, Mesh &mesh, const double tol) {
+void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
     using namespace gpf;
     std::array<HalfedgeId, 3> tri_halfedges;
     std::array<double, 3> tri_edge_lengths;
@@ -102,6 +119,8 @@ void collapse_degenerate_triangles(const std::vector<std::array<double, 3>>& ver
         return std::make_pair(tri_halfedges[max_idx], tri_edge_lengths[(max_idx + 1) % 3] + tri_edge_lengths[(max_idx + 2) % 3] - tri_edge_lengths[max_idx]);
     };
 
+    std::unordered_set<VertexId> vc_oppo_vertices;
+
     std::queue<std::pair<gpf::HalfedgeId, double>> queue;
     for (auto face : mesh.faces()) {
         auto pair = get_metric(face.id);
@@ -124,6 +143,7 @@ void collapse_degenerate_triangles(const std::vector<std::array<double, 3>>& ver
         auto vc = mesh.he_to(he_bc);
         auto he_ca = mesh.he_next(he_bc);
         auto va = mesh.he_to(he_ca);
+
 
         auto pa = Eigen::Vector3d::Map(mesh.vertex_prop(va).pt.data());
         auto pb = Eigen::Vector3d::Map(mesh.vertex_prop(vb).pt.data());
@@ -153,11 +173,35 @@ void collapse_degenerate_triangles(const std::vector<std::array<double, 3>>& ver
             collpase_eid = mesh.he_edge(he_bc);
         }
 
+        vc_oppo_vertices.clear();
+        for (auto e : mesh.vertex(vc).edges()) {
+            auto [v1, v2] = mesh.e_vertices(e.id);
+            if (v1 == vc) {
+                vc_oppo_vertices.emplace(v2);
+            } else {
+                assert(v2 == vc);
+                vc_oppo_vertices.emplace(v1);
+            }
+        }
+
+        if (std::ranges::any_of(mesh.vertex(target_vid).edges(), [&mesh, &vc_oppo_vertices, target_vid, collpase_eid](auto e) {
+            auto [v1, v2] = mesh.e_vertices(e.id);
+            const VertexId target_vid_oppo = v1 == target_vid ? v2 : v1;
+            if (vc_oppo_vertices.contains(target_vid_oppo)) {
+                for (const auto he : mesh.edge(collpase_eid).halfedges()) {
+                    if (he.next().to().id == target_vid_oppo) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return false;
+        })) {
+            continue;
+        }
+
         for (auto e : mesh.vertex(vc).edges()) {
             e.prop().need_update = true;
-        }
-        if (collpase_eid.idx == 16847) {
-            write_off("before_collapse.off", vertices, mesh);
         }
 
         mesh.collapse_edge(collpase_eid, target_vid, vc);
@@ -259,16 +303,58 @@ void identify_boundary_points(
         auto sq_dist = (closest_ret.first - p).squared_length();
         if (sq_dist < 1e-8) {
             v.prop().on_boundary = true;
+        } else {
+            const auto a = 2;
         }
     }
 }
 
+template<typename Mesh>
+void smooth_faces(
+    const std::size_t n_smooths,
+    Mesh& mesh
+) {
+    using Vec3 = Eigen::Vector3d;
+    std::vector<std::array<double, 3>> cache_points(mesh.n_vertices_capacity());
+    std::vector<gpf::VertexId> patch_interior_vertices;
+    for (const auto v : mesh.vertices()) {
+        if (!v.prop().on_boundary) {
+            patch_interior_vertices.emplace_back(v.id);
+        }
+    }
+    for (std::size_t _ = 0; _ < n_smooths; _++) {
+        for (const auto va : patch_interior_vertices) {
+            if (va.idx == 194) {
+                const auto a = 2;
+            }
+            auto pt = Vec3::Map(cache_points[va.idx].data());
+            pt.setZero();
+            auto count = 0;
+            for (const auto edge : mesh.vertex(va).edges()) {
+                auto he = edge.halfedge();
+                if (he.to().id == va) {
+                    auto vb = he.from().id;
+                    pt += Vec3::Map(he.from().prop().pt.data());
+                } else {
+                    auto vb = he.to().id;
+                    pt += Vec3::Map(he.to().prop().pt.data());
+                }
+                count += 1;
+            }
+            pt /= static_cast<double>(count);
+            const auto a = 2;
+        }
+        for (const auto vid : patch_interior_vertices) {
+            mesh.vertex_prop(vid).pt = cache_points[vid.idx];
+        }
+    }
+}
 void test_mesh_edge_collapse1() {
     using namespace gpf;
     auto data = read_off("clip_material_1.off");
     struct VertexProp {
         std::array<double, 3> pt;
-        bool on_boundary;
+        bool on_boundary {false};
     };
     struct EdgeProp {
         double len;
@@ -286,11 +372,12 @@ void test_mesh_edge_collapse1() {
         const auto a = 2;
     }
 
-    const double tol = 0.02;
-    // gpf::collapse_short_edges(mesh, tol);
+    const double tol = 0.04;
+    gpf::collapse_short_edges(mesh, tol);
     // write_off("edge_collapsed.off", data.vertices, mesh);
     // write_non_manifold_edges_obj("non_manifold.obj", data.vertices, mesh);
     // collapse_degenerate_triangles(data.vertices, mesh, tol);
+    collapse_degenerate_triangles(mesh, tol);
     const auto n_queue_cap = static_cast<std::size_t>(mesh.n_edges() * 0.4);
     std::priority_queue<double> pq;
     for (const auto e : mesh.edges()) {
@@ -302,12 +389,18 @@ void test_mesh_edge_collapse1() {
             pq.emplace(len);
         }
     }
-    const auto max_edge_len = std::max(1.0, pq.top());
+    const auto max_edge_len = std::max(0.5, pq.top());
     split_long_edges(mesh, max_edge_len);
-    for (std::size_t i = data.vertices.size(); i < mesh.n_vertices_capacity(); i++) {
-        data.vertices.emplace_back(mesh.vertex_prop(VertexId{i}).pt);
-    }
 
-    write_off("split.off", data.vertices, mesh);
+    auto base_mesh_data = read_off("bunny_stamped.off");
+    identify_boundary_points(base_mesh_data, mesh);
+    write_boundary_points_off("boundary_points.off", mesh);
+    smooth_faces(100, mesh);
+    data.vertices.resize(mesh.n_vertices_capacity());
+    for (std::size_t i = 0; i < mesh.n_vertices_capacity(); i++) {
+        data.vertices[i] = mesh.vertex_prop(VertexId{i}).pt;
+    }
+    write_off("material_1_smooth.off", data.vertices, mesh);
+
     const auto a = 2;
 }

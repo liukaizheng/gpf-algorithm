@@ -30,7 +30,7 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "dependsOn": "Configure relief (Debug)",
+            // "dependsOn": "Configure relief (Debug)",
             "problemMatcher": [
                 "$gcc"
             ]
