@@ -13,9 +13,18 @@ void
 test_triangulate_points_pentagon();
 void
 test_triangulate_10000_random_points();
-void test_cdt_with_intersections();
-void test_property_edge_length_updates();
-void test_mesh_edge_collapse1();
+void
+test_cdt_with_intersections();
+void
+test_property_edge_length_updates();
+void
+test_mesh_edge_collapse1();
+void
+test_orthtree_quadtree();
+void
+test_orthtree_octree();
+void
+test_orthtree_traversal();
 
 int
 main()
@@ -29,6 +38,9 @@ main()
     test_triangulate_points_square();
     test_triangulate_points_pentagon();
     test_property_edge_length_updates();
+    test_orthtree_quadtree();
+    test_orthtree_octree();
+    test_orthtree_traversal();
 
     std::cout << "gpf_algorithm_tests: OK\n";
     return EXIT_SUCCESS;
