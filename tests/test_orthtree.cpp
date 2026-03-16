@@ -1,143 +1,15 @@
 #include <cassert>
-#include <cmath>
 #include <iostream>
 #include <random>
 #include <vector>
 
+#include <gpf/bbox.hpp>
 #include <gpf/orthtree.hpp>
 
 namespace {
 
-struct Point2
-{
-    double x, y;
-
-    Point2() = default;
-    Point2(double v)
-      : x(v)
-      , y(v)
-    {
-    }
-    Point2(double x, double y)
-      : x(x)
-      , y(y)
-    {
-    }
-
-    double operator[](std::size_t i) const { return i == 0 ? x : y; }
-    double& operator[](std::size_t i) { return i == 0 ? x : y; }
-
-    Point2 operator+(const Point2& o) const { return { x + o.x, y + o.y }; }
-    Point2 operator-(const Point2& o) const { return { x - o.x, y - o.y }; }
-    Point2 operator*(double s) const { return { x * s, y * s }; }
-
-    double length() const { return std::sqrt(x * x + y * y); }
-};
-
-struct Bbox2
-{
-    Point2 lo, hi;
-
-    Bbox2() = default;
-    Bbox2(Point2 lo, Point2 hi)
-      : lo(lo)
-      , hi(hi)
-    {
-    }
-
-    Point2& min_bound() { return lo; }
-    const Point2& min_bound() const { return lo; }
-    Point2& max_bound() { return hi; }
-    const Point2& max_bound() const { return hi; }
-
-    double min_coord(std::size_t i) const { return lo[i]; }
-    double max_coord(std::size_t i) const { return hi[i]; }
-
-    std::size_t longest_axis() const
-    {
-        double dx = hi.x - lo.x;
-        double dy = hi.y - lo.y;
-        return dx >= dy ? 0 : 1;
-    }
-
-    Bbox2& operator+=(const Bbox2& o)
-    {
-        lo.x = std::min(lo.x, o.lo.x);
-        lo.y = std::min(lo.y, o.lo.y);
-        hi.x = std::max(hi.x, o.hi.x);
-        hi.y = std::max(hi.y, o.hi.y);
-        return *this;
-    }
-};
-
-struct Point3
-{
-    double x, y, z;
-
-    Point3() = default;
-    Point3(double v)
-      : x(v)
-      , y(v)
-      , z(v)
-    {
-    }
-    Point3(double x, double y, double z)
-      : x(x)
-      , y(y)
-      , z(z)
-    {
-    }
-
-    double operator[](std::size_t i) const { return i == 0 ? x : (i == 1 ? y : z); }
-    double& operator[](std::size_t i) { return i == 0 ? x : (i == 1 ? y : z); }
-
-    Point3 operator+(const Point3& o) const { return { x + o.x, y + o.y, z + o.z }; }
-    Point3 operator-(const Point3& o) const { return { x - o.x, y - o.y, z - o.z }; }
-    Point3 operator*(double s) const { return { x * s, y * s, z * s }; }
-};
-
-struct Bbox3
-{
-    Point3 lo, hi;
-
-    Bbox3() = default;
-    Bbox3(Point3 lo, Point3 hi)
-      : lo(lo)
-      , hi(hi)
-    {
-    }
-
-    Point3& min_bound() { return lo; }
-    const Point3& min_bound() const { return lo; }
-    Point3& max_bound() { return hi; }
-    const Point3& max_bound() const { return hi; }
-
-    double min_coord(std::size_t i) const { return lo[i]; }
-    double max_coord(std::size_t i) const { return hi[i]; }
-
-    std::size_t longest_axis() const
-    {
-        double dx = hi.x - lo.x;
-        double dy = hi.y - lo.y;
-        double dz = hi.z - lo.z;
-        if (dx >= dy && dx >= dz)
-            return 0;
-        if (dy >= dz)
-            return 1;
-        return 2;
-    }
-
-    Bbox3& operator+=(const Bbox3& o)
-    {
-        lo.x = std::min(lo.x, o.lo.x);
-        lo.y = std::min(lo.y, o.lo.y);
-        lo.z = std::min(lo.z, o.lo.z);
-        hi.x = std::max(hi.x, o.hi.x);
-        hi.y = std::max(hi.y, o.hi.y);
-        hi.z = std::max(hi.z, o.hi.z);
-        return *this;
-    }
-};
+using Bbox2 = gpf::BBox<2>;
+using Bbox3 = gpf::BBox<3>;
 
 struct SplitPred
 {
@@ -148,63 +20,15 @@ struct SplitPred
     }
 };
 
-struct DoIntersect2
-{
-    bool operator()(const Bbox2& a, const Bbox2& b) const
-    {
-        return a.lo.x <= b.hi.x && a.hi.x >= b.lo.x && a.lo.y <= b.hi.y && a.hi.y >= b.lo.y;
-    }
-};
-
-struct CalcBbox2
-{
-    Bbox2 operator()(const Bbox2& b) const { return b; }
-};
-
-struct DoIntersect3
-{
-    bool operator()(const Bbox3& a, const Bbox3& b) const
-    {
-        return a.lo.x <= b.hi.x && a.hi.x >= b.lo.x && a.lo.y <= b.hi.y && a.hi.y >= b.lo.y && a.lo.z <= b.hi.z &&
-               a.hi.z >= b.lo.z;
-    }
-};
-
-struct CalcBbox3
-{
-    Bbox3 operator()(const Bbox3& b) const { return b; }
-};
-
-struct QuadTraits
-{
-    static constexpr std::size_t Dimension = 2;
-    static constexpr std::size_t MaxDepth = 16;
-    using NT = double;
-    using BboxT = Bbox2;
-    using PrimAttrT = std::size_t;
-    using SplitPred = ::SplitPred;
-    using DoIntersect = DoIntersect2;
-    using CalcBbox = CalcBbox2;
-};
-
-struct OcTraits
-{
-    static constexpr std::size_t Dimension = 3;
-    static constexpr std::size_t MaxDepth = 16;
-    using NT = double;
-    using BboxT = Bbox3;
-    using PrimAttrT = std::size_t;
-    using SplitPred = ::SplitPred;
-    using DoIntersect = DoIntersect3;
-    using CalcBbox = CalcBbox3;
-};
+using QuadTree = gpf::Orthtree<2, SplitPred, gpf::IdentityCalcBbox, std::size_t, 16>;
+using OcTree = gpf::Orthtree<3, SplitPred, gpf::IdentityCalcBbox, std::size_t, 16>;
 
 } // namespace
 
 void
 test_orthtree_quadtree()
 {
-    gpf::Orthtree<QuadTraits> tree;
+    QuadTree tree;
 
     std::mt19937 rng(42);
     std::uniform_real_distribution<double> dist(0.0, 100.0);
@@ -245,7 +69,7 @@ test_orthtree_quadtree()
 void
 test_orthtree_octree()
 {
-    gpf::Orthtree<OcTraits> tree;
+    OcTree tree;
 
     std::mt19937 rng(123);
     std::uniform_real_distribution<double> dist(0.0, 100.0);
@@ -280,7 +104,7 @@ test_orthtree_octree()
 void
 test_orthtree_traversal()
 {
-    gpf::Orthtree<QuadTraits> tree;
+    QuadTree tree;
 
     constexpr std::size_t N = 100;
     std::vector<Bbox2> boxes;
@@ -295,7 +119,7 @@ test_orthtree_traversal()
     tree.insert_boxes(boxes, indices);
     tree.construct(false, 1.2);
 
-    gpf::BoxIntersectionTraversal<QuadTraits> trav(Bbox2({ 10.5, 0.0 }, { 20.5, 1.0 }));
+    QuadTree::BoxIntersectionTraversal trav(Bbox2({ 10.5, 0.0 }, { 20.5, 1.0 }));
     tree.traversal(trav);
 
     assert(!trav.result().empty());

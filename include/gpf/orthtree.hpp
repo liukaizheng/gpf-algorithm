@@ -5,11 +5,14 @@
 #include <bitset>
 #include <cassert>
 #include <deque>
-#include <mutex>
 #include <numeric>
 #include <queue>
 #include <type_traits>
 #include <vector>
+
+#include <Eigen/Core>
+
+#include <gpf/bbox.hpp>
 
 namespace gpf {
 
@@ -21,30 +24,6 @@ is_valid_index(std::size_t idx) noexcept
     return idx != kOrthtreeInvalidIndex;
 }
 
-namespace orthtree_detail {
-
-template<typename T>
-concept HasMaxDepth = requires {
-    { T::MaxDepth } -> std::convertible_to<std::size_t>;
-};
-
-template<typename T>
-concept HasStoreBoxesInInternalNodes = requires {
-    { T::StoreBoxesInInternalNodes } -> std::convertible_to<bool>;
-};
-
-template<typename T>
-concept HasNT = requires { typename T::NT; };
-
-template<typename T>
-concept HasPrimAttrT = requires { typename T::PrimAttrT; };
-
-template<typename T>
-concept HasNodeAttrT = requires { typename T::NodeAttrT; };
-
-template<typename T>
-concept HasShapeRefinePred = requires { typename T::ShapeRefinePred; };
-
 struct NoShapeRefinePred
 {
     template<typename Tree, typename Node>
@@ -54,120 +33,26 @@ struct NoShapeRefinePred
     }
 };
 
-template<typename T>
-struct deduce_nt
+struct IdentityCalcBbox
 {
-    using type = double;
-};
-template<HasNT T>
-struct deduce_nt<T>
-{
-    using type = typename T::NT;
-};
-template<typename T>
-using deduce_nt_t = typename deduce_nt<T>::type;
-
-template<typename T>
-struct deduce_prim_attr
-{
-    using type = void;
-};
-template<HasPrimAttrT T>
-struct deduce_prim_attr<T>
-{
-    using type = typename T::PrimAttrT;
-};
-template<typename T>
-using deduce_prim_attr_t = typename deduce_prim_attr<T>::type;
-
-template<typename T>
-struct deduce_node_attr
-{
-    using type = void;
-};
-template<HasNodeAttrT T>
-struct deduce_node_attr<T>
-{
-    using type = typename T::NodeAttrT;
-};
-template<typename T>
-using deduce_node_attr_t = typename deduce_node_attr<T>::type;
-
-template<typename T>
-struct deduce_shape_refine_pred
-{
-    using type = NoShapeRefinePred;
-};
-template<HasShapeRefinePred T>
-struct deduce_shape_refine_pred<T>
-{
-    using type = typename T::ShapeRefinePred;
-};
-template<typename T>
-using deduce_shape_refine_pred_t = typename deduce_shape_refine_pred<T>::type;
-
-} // namespace orthtree_detail
-
-template<typename UserTraits>
-struct OrthtreeTraits
-{
-    static constexpr std::size_t Dimension = UserTraits::Dimension;
-    using BboxT = typename UserTraits::BboxT;
-    using SplitPred = typename UserTraits::SplitPred;
-    using DoIntersect = typename UserTraits::DoIntersect;
-    using CalcBbox = typename UserTraits::CalcBbox;
-
-    static constexpr std::size_t MaxDepth = [] {
-        if constexpr (orthtree_detail::HasMaxDepth<UserTraits>)
-            return UserTraits::MaxDepth;
-        else
-            return std::size_t(32);
-    }();
-
-    static constexpr bool StoreBoxesInInternalNodes = [] {
-        if constexpr (orthtree_detail::HasStoreBoxesInInternalNodes<UserTraits>)
-            return UserTraits::StoreBoxesInInternalNodes;
-        else
-            return false;
-    }();
-
-    using NT = orthtree_detail::deduce_nt_t<UserTraits>;
-    using PrimAttrT = orthtree_detail::deduce_prim_attr_t<UserTraits>;
-    using NodeAttrT = orthtree_detail::deduce_node_attr_t<UserTraits>;
-    using ShapeRefinePred = orthtree_detail::deduce_shape_refine_pred_t<UserTraits>;
-    struct TreeBboxNoAttr : public BboxT
+    template<typename T>
+    const T& operator()(const T& b) const
     {
-        [[nodiscard]] const BboxT& bbox() const { return *static_cast<const BboxT*>(this); }
-        [[nodiscard]] BboxT& bbox() { return *static_cast<BboxT*>(this); }
-    };
-
-    struct TreeBboxAttr : public BboxT
-    {
-        [[nodiscard]] const BboxT& bbox() const { return *static_cast<const BboxT*>(this); }
-        [[nodiscard]] BboxT& bbox() { return *static_cast<BboxT*>(this); }
-
-        [[nodiscard]] PrimAttrT attr() const { return attr_; }
-        [[nodiscard]] PrimAttrT& attr() { return attr_; }
-
-      private:
-        PrimAttrT attr_;
-    };
-
-    using TreeBboxT = std::conditional_t<std::is_void_v<PrimAttrT>, TreeBboxNoAttr, TreeBboxAttr>;
+        return b;
+    }
 };
 
-template<typename Traits>
+template<std::size_t Dim, std::size_t MaxDepthV = 32>
 class OrthtreeNodeBase
 {
   public:
-    static constexpr std::size_t MaxDepth = Traits::MaxDepth;
-    static constexpr std::size_t Dimension = Traits::Dimension;
-    static constexpr std::size_t Degree = (1u << Dimension);
+    static constexpr std::size_t MaxDepth = MaxDepthV;
+    static constexpr std::size_t Dimension = Dim;
+    static constexpr std::size_t Degree = (1u << Dim);
 
     static_assert(MaxDepth <= 64);
 
-    using BboxT = typename Traits::BboxT;
-    using TreeBboxT = typename Traits::TreeBboxT;
+    using BboxT = BBox<Dim>;
 
     OrthtreeNodeBase()
     {
@@ -221,8 +106,8 @@ class OrthtreeNodeBase
     std::array<std::size_t, Degree> child_map;
 };
 
-template<typename Traits, typename NodeAttrT>
-class OrthtreeNode : public OrthtreeNodeBase<Traits>
+template<std::size_t Dim, std::size_t MaxDepthV, typename NodeAttrT>
+class OrthtreeNode : public OrthtreeNodeBase<Dim, MaxDepthV>
 {
   public:
     [[nodiscard]] NodeAttrT& attribute() { return attribute_; }
@@ -232,33 +117,81 @@ class OrthtreeNode : public OrthtreeNodeBase<Traits>
     NodeAttrT attribute_;
 };
 
-template<typename Traits>
-class OrthtreeNode<Traits, void> : public OrthtreeNodeBase<Traits>
+template<std::size_t Dim, std::size_t MaxDepthV>
+class OrthtreeNode<Dim, MaxDepthV, void> : public OrthtreeNodeBase<Dim, MaxDepthV>
 {};
 
-template<typename UserTraits>
+template<std::size_t Dim,
+         typename SplitPredT,
+         typename CalcBboxT = IdentityCalcBbox,
+         typename PrimAttrT = std::size_t,
+         std::size_t MaxDepthV = 32,
+         typename NodeAttrT = void,
+         typename ShapeRefinePredT = NoShapeRefinePred,
+         bool StoreBoxesInInternalNodesV = false>
 class Orthtree
 {
   public:
-    using Traits = OrthtreeTraits<UserTraits>;
+    static constexpr std::size_t Dimension = Dim;
+    static constexpr std::size_t MaxDepth = MaxDepthV;
+    static constexpr std::size_t Degree = (1u << Dim);
+    static constexpr bool StoreBoxesInInternalNodes = StoreBoxesInInternalNodesV;
 
-    static constexpr std::size_t MaxDepth = Traits::MaxDepth;
-    static constexpr std::size_t Dimension = Traits::Dimension;
-    static constexpr std::size_t Degree = (1u << Dimension);
-    static constexpr bool StoreBoxesInInternalNodes = Traits::StoreBoxesInInternalNodes;
+    using BboxT = BBox<Dim>;
+    using TreePoint = std::array<double, Dim>;
+    using EigenVec = Eigen::Vector<double, static_cast<int>(Dim)>;
 
-    using NT = typename Traits::NT;
-    using BboxT = typename Traits::BboxT;
-    using TreeBboxT = typename Traits::TreeBboxT;
-    using TreePoint = std::remove_cvref_t<decltype(std::declval<TreeBboxT>().min_bound())>;
+    using SplitPred = SplitPredT;
+    using CalcBbox = CalcBboxT;
+    using ShapeRefinePred = ShapeRefinePredT;
 
-    using CalcBbox = typename Traits::CalcBbox;
-    using DoIntersect = typename Traits::DoIntersect;
-    using SplitPred = typename Traits::SplitPred;
-    using ShapeRefinePred = typename Traits::ShapeRefinePred;
+    using Node = OrthtreeNode<Dim, MaxDepthV, NodeAttrT>;
 
-    using NodeAttrT = typename Traits::NodeAttrT;
-    using Node = OrthtreeNode<Traits, NodeAttrT>;
+    struct TreeBboxNoAttr : public BboxT
+    {
+        [[nodiscard]] const BboxT& bbox() const { return *static_cast<const BboxT*>(this); }
+        [[nodiscard]] BboxT& bbox() { return *static_cast<BboxT*>(this); }
+    };
+
+    struct TreeBboxWithAttr : public BboxT
+    {
+        [[nodiscard]] const BboxT& bbox() const { return *static_cast<const BboxT*>(this); }
+        [[nodiscard]] BboxT& bbox() { return *static_cast<BboxT*>(this); }
+
+        [[nodiscard]] PrimAttrT attr() const { return attr_; }
+        [[nodiscard]] PrimAttrT& attr() { return attr_; }
+
+      private:
+        PrimAttrT attr_;
+    };
+
+    using TreeBboxT = std::conditional_t<std::is_void_v<PrimAttrT>, TreeBboxNoAttr, TreeBboxWithAttr>;
+
+    class BoxIntersectionTraversal
+    {
+      public:
+        template<typename QPrimT>
+        explicit BoxIntersectionTraversal(const QPrimT& query)
+          : box_of_query(CalcBbox()(query))
+        {
+        }
+
+        bool intersection(const TreeBboxT& leaf_bbox)
+        {
+            if (box_of_query.intersects(leaf_bbox.bbox())) {
+                intersected_ids.push_back(leaf_bbox.attr());
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool do_inter(const BboxT& b) const { return b.intersects(box_of_query); }
+
+        [[nodiscard]] const std::vector<std::size_t>& result() const { return intersected_ids; }
+
+      private:
+        BboxT box_of_query;
+        std::vector<std::size_t> intersected_ids;
+    };
 
     Orthtree() = default;
 
@@ -280,7 +213,6 @@ class Orthtree
         bbox = rhs.bbox;
         split_pred = rhs.split_pred;
         shape_refine_pred = rhs.shape_refine_pred;
-        do_intersect = rhs.do_intersect;
         calc_bbox = rhs.calc_bbox;
         enlarge_ratio = rhs.enlarge_ratio;
     }
@@ -311,7 +243,7 @@ class Orthtree
         }
     }
 
-    void construct(bool compact_box = false, NT enlarge = NT(1.2), NT adaptive_thres = NT(0.1))
+    void construct(bool compact_box = false, double enlarge = 1.2, double adaptive_thres = 0.1)
     {
         enlarge_ratio = enlarge;
         adaptive_threshold = adaptive_thres;
@@ -322,17 +254,24 @@ class Orthtree
         nodes.emplace_back();
         root_node().tight_box = bbox;
 
-        TreePoint bbox_center = (bbox.max_bound() + bbox.min_bound()) * NT(0.5);
-        TreePoint side_length = bbox.max_bound() - bbox.min_bound();
-        assert(enlarge >= NT(1.0));
+        TreePoint bbox_center;
+        EigenVec::Map(bbox_center.data()) =
+          (EigenVec::Map(bbox.min_bound().data()) + EigenVec::Map(bbox.max_bound().data())) * 0.5;
+        TreePoint side_length;
+        EigenVec::Map(side_length.data()) =
+          EigenVec::Map(bbox.max_bound().data()) - EigenVec::Map(bbox.min_bound().data());
+        assert(enlarge >= 1.0);
         if (!compact_box) {
             std::size_t longest = bbox.longest_axis();
-            side_length = TreePoint(side_length[longest]);
+            double longest_val = side_length[longest];
+            side_length.fill(longest_val);
         }
-        side_length = side_length * enlarge;
+        EigenVec::Map(side_length.data()) *= enlarge;
 
-        bbox.min_bound() = bbox_center - side_length * NT(0.5);
-        bbox.max_bound() = bbox_center + side_length * NT(0.5);
+        EigenVec::Map(bbox.min_bound().data()) =
+          EigenVec::Map(bbox_center.data()) - EigenVec::Map(side_length.data()) * 0.5;
+        EigenVec::Map(bbox.max_bound().data()) =
+          EigenVec::Map(bbox_center.data()) + EigenVec::Map(side_length.data()) * 0.5;
 
         root_node().loose_box = bbox;
         root_node().box_indices.resize(boxes.size());
@@ -462,7 +401,10 @@ class Orthtree
 
     [[nodiscard]] TreePoint node_center(const Node& nd) const
     {
-        return (nd.tight_box.min_bound() + nd.tight_box.max_bound()) * NT(0.5);
+        TreePoint result;
+        EigenVec::Map(result.data()) =
+          (EigenVec::Map(nd.tight_box.min_bound().data()) + EigenVec::Map(nd.tight_box.max_bound().data())) * 0.5;
+        return result;
     }
 
     [[nodiscard]] std::vector<std::size_t> all_leaf_nodes() const
@@ -505,7 +447,7 @@ class Orthtree
         std::array<bool, Dimension> partitionable;
         for (std::size_t i = 0; i < Dimension; ++i) {
             partitionable[i] =
-              (static_cast<NT>(lower[i] + higher[i] - total) / static_cast<NT>(total) < adaptive_threshold) &&
+              (static_cast<double>(lower[i] + higher[i] - total) / static_cast<double>(total) < adaptive_threshold) &&
               (lower[i] > 0 && higher[i] > 0);
         }
 
@@ -673,17 +615,23 @@ class Orthtree
 
         if constexpr (Dimension == 2) {
             child_boxes[0] = BboxT(minb, center);
-            child_boxes[1] = BboxT(TreePoint(center[0], minb[1]), TreePoint(maxb[0], center[1]));
-            child_boxes[2] = BboxT(TreePoint(minb[0], center[1]), TreePoint(center[0], maxb[1]));
+            child_boxes[1] = BboxT(TreePoint{ center[0], minb[1] }, TreePoint{ maxb[0], center[1] });
+            child_boxes[2] = BboxT(TreePoint{ minb[0], center[1] }, TreePoint{ center[0], maxb[1] });
             child_boxes[3] = BboxT(center, maxb);
         } else if constexpr (Dimension == 3) {
             child_boxes[0] = BboxT(minb, center);
-            child_boxes[1] = BboxT(TreePoint(center[0], minb[1], minb[2]), TreePoint(maxb[0], center[1], center[2]));
-            child_boxes[2] = BboxT(TreePoint(minb[0], center[1], minb[2]), TreePoint(center[0], maxb[1], center[2]));
-            child_boxes[3] = BboxT(TreePoint(center[0], center[1], minb[2]), TreePoint(maxb[0], maxb[1], center[2]));
-            child_boxes[4] = BboxT(TreePoint(minb[0], minb[1], center[2]), TreePoint(center[0], center[1], maxb[2]));
-            child_boxes[5] = BboxT(TreePoint(center[0], minb[1], center[2]), TreePoint(maxb[0], center[1], maxb[2]));
-            child_boxes[6] = BboxT(TreePoint(minb[0], center[1], center[2]), TreePoint(center[0], maxb[1], maxb[2]));
+            child_boxes[1] =
+              BboxT(TreePoint{ center[0], minb[1], minb[2] }, TreePoint{ maxb[0], center[1], center[2] });
+            child_boxes[2] =
+              BboxT(TreePoint{ minb[0], center[1], minb[2] }, TreePoint{ center[0], maxb[1], center[2] });
+            child_boxes[3] =
+              BboxT(TreePoint{ center[0], center[1], minb[2] }, TreePoint{ maxb[0], maxb[1], center[2] });
+            child_boxes[4] =
+              BboxT(TreePoint{ minb[0], minb[1], center[2] }, TreePoint{ center[0], center[1], maxb[2] });
+            child_boxes[5] =
+              BboxT(TreePoint{ center[0], minb[1], center[2] }, TreePoint{ maxb[0], center[1], maxb[2] });
+            child_boxes[6] =
+              BboxT(TreePoint{ minb[0], center[1], center[2] }, TreePoint{ center[0], maxb[1], maxb[2] });
             child_boxes[7] = BboxT(center, maxb);
         } else {
             for (std::size_t i = 0; i < Degree; ++i) {
@@ -828,45 +776,10 @@ class Orthtree
 
     SplitPred split_pred;
     ShapeRefinePred shape_refine_pred;
-    DoIntersect do_intersect;
     CalcBbox calc_bbox;
 
-    NT enlarge_ratio = NT(1.5);
-    NT adaptive_threshold = NT(0.1);
-};
-
-template<typename Traits>
-class BoxIntersectionTraversal
-{
-  public:
-    using DeducedTraits = OrthtreeTraits<Traits>;
-    using NT = typename DeducedTraits::NT;
-    using BboxT = typename DeducedTraits::BboxT;
-    using TreeBboxT = typename DeducedTraits::TreeBboxT;
-    using CalcBbox = typename DeducedTraits::CalcBbox;
-    using DoIntersect = typename DeducedTraits::DoIntersect;
-
-    template<typename QPrimT>
-    explicit BoxIntersectionTraversal(const QPrimT& query)
-      : box_of_query(CalcBbox()(query))
-    {
-    }
-
-    bool intersection(const TreeBboxT& leaf_bbox)
-    {
-        if (DoIntersect()(box_of_query, leaf_bbox.bbox())) {
-            intersected_ids.push_back(leaf_bbox.attr());
-        }
-        return true;
-    }
-
-    [[nodiscard]] bool do_inter(const BboxT& b) const { return DoIntersect()(b, box_of_query); }
-
-    [[nodiscard]] const std::vector<std::size_t>& result() const { return intersected_ids; }
-
-  private:
-    BboxT box_of_query;
-    std::vector<std::size_t> intersected_ids;
+    double enlarge_ratio = 1.5;
+    double adaptive_threshold = 0.1;
 };
 
 } // namespace gpf
