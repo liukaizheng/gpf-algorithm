@@ -11,17 +11,8 @@ namespace {
 using Bbox2 = gpf::BBox<2>;
 using Bbox3 = gpf::BBox<3>;
 
-struct SplitPred
-{
-    template<typename Tree, typename Node>
-    bool operator()(const Tree&, const Node& nd) const
-    {
-        return nd.total_size > 10;
-    }
-};
-
-using QuadTree = gpf::Orthtree<2, SplitPred, gpf::IdentityCalcBbox, std::size_t, 16>;
-using OcTree = gpf::Orthtree<3, SplitPred, gpf::IdentityCalcBbox, std::size_t, 16>;
+using QuadTree = gpf::Orthtree<2>;
+using OcTree = gpf::Orthtree<3>;
 
 } // namespace
 
@@ -49,7 +40,9 @@ test_orthtree_quadtree()
     }
 
     tree.insert_boxes(boxes, indices);
-    tree.construct(true, 1.01);
+    tree.config.enlarge_ratio = 1.01;
+    tree.config.max_depth = 16;
+    tree.construct(true);
 
     assert(!tree.nodes.empty());
     assert(tree.root_node().is_internal());
@@ -90,7 +83,9 @@ test_orthtree_octree()
     }
 
     tree.insert_boxes(boxes, indices);
-    tree.construct(true, 1.01);
+    tree.config.enlarge_ratio = 1.01;
+    tree.config.max_depth = 16;
+    tree.construct(true);
 
     assert(!tree.nodes.empty());
     assert(tree.root_node().is_internal());
@@ -117,7 +112,8 @@ test_orthtree_traversal()
     }
 
     tree.insert_boxes(boxes, indices);
-    tree.construct(false, 1.2);
+    tree.config.max_depth = 16;
+    tree.construct(false);
 
     QuadTree::BoxIntersectionTraversal trav(Bbox2({ 10.5, 0.0 }, { 20.5, 1.0 }));
     tree.traversal(trav);

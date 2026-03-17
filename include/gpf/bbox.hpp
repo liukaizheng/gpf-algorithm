@@ -3,18 +3,26 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <limits>
 
 namespace gpf {
 
 template<std::size_t N>
 struct BBox
 {
-    std::array<double, N> lo{};
-    std::array<double, N> hi{};
+    std::array<double, N> lo;
+    std::array<double, N> hi;
 
-    BBox() = default;
+    BBox()
+    {
+        lo.fill(std::numeric_limits<double>::max());
+        hi.fill(std::numeric_limits<double>::min());
+    }
 
-    BBox(const std::array<double, N>& lo, const std::array<double, N>& hi)
+    // Compiler-generated copy/move constructors are sufficient:
+    // BBox only holds std::array<double, N> (fixed-size, inline storage, no indirection),
+    // so moving is identical to copying — there is no heap pointer to steal.
+    BBox(std::array<double, N> lo, std::array<double, N> hi) noexcept
       : lo(lo)
       , hi(hi)
     {

@@ -6,7 +6,6 @@
 #include <cassert>
 #include <deque>
 #include <numeric>
-#include <queue>
 #include <type_traits>
 #include <vector>
 
@@ -24,33 +23,20 @@ is_valid_index(std::size_t idx) noexcept
     return idx != kOrthtreeInvalidIndex;
 }
 
-struct NoShapeRefinePred
+struct OrthtreeConfig
 {
-    template<typename Tree, typename Node>
-    bool operator()(const Tree&, const Node&, auto&) const
-    {
-        return false;
-    }
+    double enlarge_ratio = 1.01;
+    double adaptive_threshold = 0.2;
+    std::size_t max_depth = 16;
+    std::size_t max_leaf_size = 100;
 };
 
-struct IdentityCalcBbox
-{
-    template<typename T>
-    const T& operator()(const T& b) const
-    {
-        return b;
-    }
-};
-
-template<std::size_t Dim, std::size_t MaxDepthV = 32>
+template<std::size_t Dim>
 class OrthtreeNodeBase
 {
   public:
-    static constexpr std::size_t MaxDepth = MaxDepthV;
     static constexpr std::size_t Dimension = Dim;
     static constexpr std::size_t Degree = (1u << Dim);
-
-    static_assert(MaxDepth <= 64);
 
     using BboxT = BBox<Dim>;
 
@@ -106,73 +92,37 @@ class OrthtreeNodeBase
     std::array<std::size_t, Degree> child_map;
 };
 
-template<std::size_t Dim, std::size_t MaxDepthV, typename NodeAttrT>
-class OrthtreeNode : public OrthtreeNodeBase<Dim, MaxDepthV>
-{
-  public:
-    [[nodiscard]] NodeAttrT& attribute() { return attribute_; }
-    [[nodiscard]] const NodeAttrT& attribute() const { return attribute_; }
-
-  private:
-    NodeAttrT attribute_;
-};
-
-template<std::size_t Dim, std::size_t MaxDepthV>
-class OrthtreeNode<Dim, MaxDepthV, void> : public OrthtreeNodeBase<Dim, MaxDepthV>
-{};
-
-template<std::size_t Dim,
-         typename SplitPredT,
-         typename CalcBboxT = IdentityCalcBbox,
-         typename PrimAttrT = std::size_t,
-         std::size_t MaxDepthV = 32,
-         typename NodeAttrT = void,
-         typename ShapeRefinePredT = NoShapeRefinePred,
-         bool StoreBoxesInInternalNodesV = false>
+template<std::size_t Dim>
 class Orthtree
 {
   public:
     static constexpr std::size_t Dimension = Dim;
-    static constexpr std::size_t MaxDepth = MaxDepthV;
     static constexpr std::size_t Degree = (1u << Dim);
-    static constexpr bool StoreBoxesInInternalNodes = StoreBoxesInInternalNodesV;
 
     using BboxT = BBox<Dim>;
     using TreePoint = std::array<double, Dim>;
     using EigenVec = Eigen::Vector<double, static_cast<int>(Dim)>;
 
-    using SplitPred = SplitPredT;
-    using CalcBbox = CalcBboxT;
-    using ShapeRefinePred = ShapeRefinePredT;
+    using Node = OrthtreeNodeBase<Dim>;
 
-    using Node = OrthtreeNode<Dim, MaxDepthV, NodeAttrT>;
-
-    struct TreeBboxNoAttr : public BboxT
-    {
-        [[nodiscard]] const BboxT& bbox() const { return *static_cast<const BboxT*>(this); }
-        [[nodiscard]] BboxT& bbox() { return *static_cast<BboxT*>(this); }
-    };
-
-    struct TreeBboxWithAttr : public BboxT
+    struct TreeBboxT : public BboxT
     {
         [[nodiscard]] const BboxT& bbox() const { return *static_cast<const BboxT*>(this); }
         [[nodiscard]] BboxT& bbox() { return *static_cast<BboxT*>(this); }
 
-        [[nodiscard]] PrimAttrT attr() const { return attr_; }
-        [[nodiscard]] PrimAttrT& attr() { return attr_; }
+        [[nodiscard]] std::size_t attr() const { return attr_; }
+        [[nodiscard]] std::size_t& attr() { return attr_; }
 
       private:
-        PrimAttrT attr_;
+        std::size_t attr_;
     };
-
-    using TreeBboxT = std::conditional_t<std::is_void_v<PrimAttrT>, TreeBboxNoAttr, TreeBboxWithAttr>;
 
     class BoxIntersectionTraversal
     {
       public:
         template<typename QPrimT>
         explicit BoxIntersectionTraversal(const QPrimT& query)
-          : box_of_query(CalcBbox()(query))
+          : box_of_query(query)
         {
         }
 
@@ -211,23 +161,7 @@ class Orthtree
             nodes[i].shallow_copy_from(rhs.nodes[i]);
         }
         bbox = rhs.bbox;
-        split_pred = rhs.split_pred;
-        shape_refine_pred = rhs.shape_refine_pred;
-        calc_bbox = rhs.calc_bbox;
-        enlarge_ratio = rhs.enlarge_ratio;
-    }
-
-    template<typename Primitives, typename Attributes>
-    void insert_primitives(const Primitives& primitives, const Attributes& attributes)
-    {
-        assert(primitives.size() == attributes.size());
-        clear();
-        boxes.reserve(static_cast<std::size_t>(primitives.size() * 1.2));
-        boxes.resize(primitives.size());
-        for (std::size_t i = 0; i < primitives.size(); ++i) {
-            boxes[i].bbox() = calc_bbox(primitives[i]);
-            boxes[i].attr() = attributes[i];
-        }
+        config = rhs.config;
     }
 
     template<typename Bboxes, typename Attributes>
@@ -235,7 +169,6 @@ class Orthtree
     {
         assert(bboxes.size() == attributes.size());
         clear();
-        boxes.reserve(static_cast<std::size_t>(bboxes.size() * 1.2));
         boxes.resize(bboxes.size());
         for (std::size_t i = 0; i < bboxes.size(); ++i) {
             boxes[i].bbox() = bboxes[i];
@@ -243,11 +176,8 @@ class Orthtree
         }
     }
 
-    void construct(bool compact_box = false, double enlarge = 1.2, double adaptive_thres = 0.1)
+    void construct(bool compact_box = false)
     {
-        enlarge_ratio = enlarge;
-        adaptive_threshold = adaptive_thres;
-
         bbox = calc_bbox_from_boxes(boxes.begin(), boxes.end());
 
         nodes.clear();
@@ -260,13 +190,12 @@ class Orthtree
         TreePoint side_length;
         EigenVec::Map(side_length.data()) =
           EigenVec::Map(bbox.max_bound().data()) - EigenVec::Map(bbox.min_bound().data());
-        assert(enlarge >= 1.0);
         if (!compact_box) {
             std::size_t longest = bbox.longest_axis();
             double longest_val = side_length[longest];
             side_length.fill(longest_val);
         }
-        EigenVec::Map(side_length.data()) *= enlarge;
+        EigenVec::Map(side_length.data()) *= config.enlarge_ratio;
 
         EigenVec::Map(bbox.min_bound().data()) =
           EigenVec::Map(bbox_center.data()) - EigenVec::Map(side_length.data()) * 0.5;
@@ -285,86 +214,11 @@ class Orthtree
             std::size_t cur_idx = nodes_to_split.front();
             nodes_to_split.pop_front();
             Node& cur = node(cur_idx);
-            if (cur.depth < MaxDepth && split_pred(*this, cur)) {
+            if (cur.depth < config.max_depth && cur.total_size > config.max_leaf_size) {
                 if (split(cur_idx)) {
                     for (std::size_t i = 0; i < node(cur_idx).n_children; ++i) {
                         nodes_to_split.push_back(node(cur_idx).child(i));
                     }
-                }
-            }
-        }
-    }
-
-    void shape_refine()
-    {
-        std::queue<std::size_t> nodes_to_split;
-        for (std::size_t nidx = 0; nidx < nodes.size(); ++nidx) {
-            if (node(nidx).is_leaf()) {
-                nodes_to_split.push(nidx);
-            }
-        }
-
-        while (!nodes_to_split.empty()) {
-            std::size_t cur_idx = nodes_to_split.front();
-            nodes_to_split.pop();
-
-            std::array<bool, Dimension> partitionable;
-            if (node(cur_idx).depth < MaxDepth && shape_refine_pred(*this, node(cur_idx), partitionable)) {
-                TreePoint center = node_center(node(cur_idx));
-
-                std::array<BboxT, Degree> child_boxes;
-                calc_box_for_children(node(cur_idx), center, child_boxes);
-
-                bool need_moving = std::find(partitionable.begin(), partitionable.end(), false) != partitionable.end();
-
-                if (need_moving) {
-                    std::array<std::size_t, Degree> collapse_dest;
-                    calc_collapse_destination(partitionable, collapse_dest);
-                    for (std::size_t i = 0; i < Degree; ++i) {
-                        std::size_t dest = collapse_dest[i];
-                        if (dest == i)
-                            continue;
-                        child_boxes[dest] += child_boxes[i];
-                    }
-                    unsigned int n_ch = 1u << static_cast<unsigned int>(std::count_if(
-                                          partitionable.begin(), partitionable.end(), [](bool b) { return b; }));
-
-                    std::size_t children_idx = new_children(n_ch);
-                    node(cur_idx).children_start = children_idx;
-                    node(cur_idx).n_children = n_ch;
-                    node(cur_idx).child_map = collapse_dest;
-
-                    std::array<std::size_t, Degree> sorted_dest = collapse_dest;
-                    std::sort(sorted_dest.begin(), sorted_dest.end());
-                    auto end_it = std::unique(sorted_dest.begin(), sorted_dest.end());
-                    (void)end_it;
-                    for (std::size_t i = 0; i < n_ch; ++i) {
-                        Node& ch = node(node(cur_idx).child(i));
-                        ch.depth = node(cur_idx).depth + 1;
-                        ch.parent = cur_idx;
-                        ch.loose_box = child_boxes[sorted_dest[i]];
-                        ch.tight_box = ch.loose_box;
-                        ch.total_size = 0;
-                        for (std::size_t& dest : node(cur_idx).child_map)
-                            if (dest == sorted_dest[i])
-                                dest = i;
-                    }
-                } else {
-                    std::size_t children_idx = new_children(Degree);
-                    node(cur_idx).children_start = children_idx;
-                    node(cur_idx).n_children = Degree;
-                    std::iota(node(cur_idx).child_map.begin(), node(cur_idx).child_map.end(), std::size_t(0));
-                    for (std::size_t i = 0; i < Degree; ++i) {
-                        Node& ch = node(node(cur_idx).child(i));
-                        ch.depth = node(cur_idx).depth + 1;
-                        ch.parent = cur_idx;
-                        ch.loose_box = child_boxes[i];
-                        ch.tight_box = ch.loose_box;
-                        ch.total_size = 0;
-                    }
-                }
-                for (std::size_t i = 0; i < node(cur_idx).n_children; ++i) {
-                    nodes_to_split.push(node(cur_idx).child(i));
                 }
             }
         }
@@ -446,9 +300,9 @@ class Orthtree
         std::size_t total = node(node_idx).total_size;
         std::array<bool, Dimension> partitionable;
         for (std::size_t i = 0; i < Dimension; ++i) {
-            partitionable[i] =
-              (static_cast<double>(lower[i] + higher[i] - total) / static_cast<double>(total) < adaptive_threshold) &&
-              (lower[i] > 0 && higher[i] > 0);
+            partitionable[i] = (static_cast<double>(lower[i] + higher[i] - total) / static_cast<double>(total) <
+                                config.adaptive_threshold) &&
+                               (lower[i] > 0 && higher[i] > 0);
         }
 
         if (std::find(partitionable.begin(), partitionable.end(), true) == partitionable.end()) {
@@ -469,17 +323,11 @@ class Orthtree
                     continue;
                 auto& dst = assign_res[dest];
                 auto& src = assign_res[i];
-                std::vector<std::size_t> tmp = std::move(dst);
+                std::vector<std::size_t> tmp;
+                tmp.swap(dst);
                 dst.reserve(tmp.size() + src.size());
-                merge_unique(tmp.begin(),
-                             tmp.end(),
-                             src.begin(),
-                             src.end(),
-                             std::back_inserter(dst),
-                             std::less<std::size_t>(),
-                             std::equal_to<std::size_t>());
+                std::ranges::set_union(tmp, src, std::back_inserter(dst));
                 src.clear();
-                src.shrink_to_fit();
                 child_boxes[dest] += child_boxes[i];
             }
 
@@ -523,9 +371,7 @@ class Orthtree
 
         calc_tight_box_for_children(node(node_idx));
 
-        if constexpr (!StoreBoxesInInternalNodes) {
-            node(node_idx).box_indices = std::vector<std::size_t>();
-        }
+        node(node_idx).box_indices = std::vector<std::size_t>();
 
         return true;
     }
@@ -536,15 +382,13 @@ class Orthtree
         Node& nd = node(node_idx);
         std::size_t ch = nd.children_start;
 
-        if constexpr (!StoreBoxesInInternalNodes) {
-            auto& box_idx = nd.box_indices;
-            box_idx.clear();
-            box_idx.reserve(nd.total_size);
-            for (std::size_t i = 0; i < nd.n_children; ++i) {
-                auto& ch_boxes = node(ch + i).box_indices;
-                box_idx.insert(box_idx.end(), ch_boxes.begin(), ch_boxes.end());
-                ch_boxes = std::vector<std::size_t>();
-            }
+        auto& box_idx = nd.box_indices;
+        box_idx.clear();
+        box_idx.reserve(nd.total_size);
+        for (std::size_t i = 0; i < nd.n_children; ++i) {
+            auto& ch_boxes = node(ch + i).box_indices;
+            box_idx.insert(box_idx.end(), ch_boxes.begin(), ch_boxes.end());
+            ch_boxes = std::vector<std::size_t>();
         }
 
         nd.children_start = kOrthtreeInvalidIndex;
@@ -684,81 +528,6 @@ class Orthtree
         return go_next;
     }
 
-    template<typename Iter, typename OutIter, typename LessPred, typename EqualPred>
-    static void merge_unique(Iter b1, Iter e1, Iter b2, Iter e2, OutIter o, LessPred lp, EqualPred ep)
-    {
-        using ValueT = std::remove_cvref_t<decltype(*b1)>;
-        ValueT last{};
-        if (b1 == e1 || b2 == e2) {
-            if (b1 != e1) {
-                *o = *b1;
-                last = *b1;
-                ++o;
-                ++b1;
-            } else if (b2 != e2) {
-                *o = *b2;
-                last = *b2;
-                ++o;
-                ++b2;
-            } else {
-                return;
-            }
-        } else {
-            if (lp(*b1, *b2)) {
-                *o = *b1;
-                last = *b1;
-                ++o;
-                ++b1;
-            } else if (lp(*b2, *b1)) {
-                *o = *b2;
-                last = *b2;
-                ++o;
-                ++b2;
-            } else {
-                *o = *b1;
-                last = *b1;
-                ++o;
-                ++b1;
-                ++b2;
-            }
-        }
-        while (b1 != e1 && b2 != e2) {
-            if (lp(*b1, *b2)) {
-                if (!ep(*b1, last)) {
-                    *o = *b1;
-                    last = *b1;
-                    ++o;
-                }
-                ++b1;
-            } else if (lp(*b2, *b1)) {
-                if (!ep(*b2, last)) {
-                    *o = *b2;
-                    last = *b2;
-                    ++o;
-                }
-                ++b2;
-            } else {
-                if (!ep(*b1, last)) {
-                    *o = *b1;
-                    last = *b1;
-                    ++o;
-                }
-                ++b1;
-                ++b2;
-            }
-        }
-        while (b1 != e1) {
-            *o = *b1;
-            ++o;
-            ++b1;
-        }
-        while (b2 != e2) {
-            *o = *b2;
-            ++o;
-            ++b2;
-        }
-    }
-
     template<typename Iter>
     static BboxT calc_bbox_from_boxes(Iter begin, Iter end)
     {
@@ -774,12 +543,7 @@ class Orthtree
     std::vector<TreeBboxT> boxes;
     BboxT bbox;
 
-    SplitPred split_pred;
-    ShapeRefinePred shape_refine_pred;
-    CalcBbox calc_bbox;
-
-    double enlarge_ratio = 1.5;
-    double adaptive_threshold = 0.1;
+    OrthtreeConfig config;
 };
 
 } // namespace gpf

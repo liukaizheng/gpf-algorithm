@@ -62,12 +62,12 @@ Enforced by `.clang-format` (Mozilla-derived). Key rules:
 - **Pointer/Reference**: left-aligned (`int* p`, `int& r`)
 
 ### Naming Conventions
-- **Types/Structs/Classes**: `PascalCase` (`OrthtreeNode`, `BBox`, `TreeBboxT`)
-- **Template params**: `PascalCase` (`SplitPredT`, `DoIntersectT`)
+- Types/Structs/Classes: `PascalCase` (`OrthtreeNodeBase`, `BBox`, `TreeBboxT`)
+- **Template params**: `PascalCase` (`DoIntersectT`)
 - **Functions/Methods**: `snake_case` (`min_bound`, `longest_axis`, `calc_bbox_from_boxes`)
 - **Variables/Members**: `snake_case` (`bbox_center`, `side_length`, `enlarge_ratio`)
 - **Constants**: `k` prefix + `PascalCase` (`kOrthtreeInvalidIndex`, `kRootIdx`)
-- **Type aliases**: `PascalCase` with `T` suffix when disambiguating (`BboxT`, `NodeAttrT`, `PrimAttrT`)
+- **Type aliases**: `PascalCase` with `T` suffix when disambiguating (`BboxT`, `TreeBboxT`)
 - **Concept names**: `PascalCase` (`HasMaxDepth`, `HasPositionProperty`)
 
 ### Includes
@@ -95,8 +95,9 @@ EigenVec::Map(a.data()) *= s;
 - `if constexpr` for dimension-specific optimizations
 - Direct template parameters with defaults over traits structs:
 ```cpp
-gpf::Orthtree<Dim, SplitPredT, DoIntersectT, CalcBboxT, PrimAttrT, MaxDepth, ...>
+gpf::Orthtree<Dim>
 ```
+- Runtime configuration via `OrthtreeConfig` (enlarge_ratio, adaptive_threshold, max_depth, max_leaf_size)
 
 ### Error Handling
 - `assert()` for invariant checks (preconditions, array bounds)
@@ -125,9 +126,12 @@ gpf::Orthtree<Dim, SplitPredT, DoIntersectT, CalcBboxT, PrimAttrT, MaxDepth, ...
 ### Orthtree Usage
 Direct template parameters — no traits struct needed:
 ```cpp
-gpf::Orthtree<3, MySplitPred, MyDoIntersect> tree;
-// Defaults: CalcBbox=IdentityCalcBbox, PrimAttrT=std::size_t, MaxDepth=32
+gpf::Orthtree<3> tree;
+// Runtime config: tree.config.max_depth, tree.config.enlarge_ratio, tree.config.adaptive_threshold, tree.config.max_leaf_size
 // BoxIntersectionTraversal is a nested class:
+tree.config.max_depth = 16;
+tree.config.max_leaf_size = 10;
+tree.construct();
 decltype(tree)::BoxIntersectionTraversal trav(query_bbox);
 tree.traversal(trav);
 ```
