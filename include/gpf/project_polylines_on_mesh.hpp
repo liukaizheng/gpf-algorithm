@@ -860,68 +860,62 @@ void TracePolyline<N, Mesh>::trace_from_vertex(gpf::HalfedgeId start_hid) {
 template<std::size_t N, typename Mesh>
 void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* dir_data, const gpf::VertexId end_vid) {
     using Vec = Eigen::Matrix<double, N, 1>;
-    auto he_ab = mesh->halfedge(hab);
-    auto he_bc = he_ab.next();
-    if (he_bc.to().id == end_vid) {
-        path.emplace_back(end_vid);
-        path_on_face_vec.emplace_back(he_bc.face().id);
-        return;
-    }
-
-    auto trace_next = [this, dir_data, end_vid, &he_bc](const auto& mid_pt, const auto& pa, const auto& pb, const auto& pc, const auto& pd) {
-        auto vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc.data());
-        if (vc_ori > 0.0) {
-            auto right_ori = predicates::orient2d(mid_pt.data(), pb.data(), pd.data());
-            assert(right_ori > 0.0);
-            add_intersection_point(vc_ori, right_ori, he_bc.id);
-            if constexpr (N == 2) {
-                trace_from_edge(he_bc.twin().id, dir_data, end_vid);
-            } else {
-                auto dir = Vector2d::Map(dir_data);
-                Vector2d new_dir = complex_div(dir, pb - pc).normalized();
-                trace_from_edge(he_bc.twin().id, new_dir.data(), end_vid);
-            }
-        } else {
-            auto right_ori = -vc_ori;
-            auto left_ori = predicates::orient2d(mid_pt.data(), pd.data(), pa.data());
-            assert(left_ori > 0.0);
-            auto he_ca = he_bc.next();
-            add_intersection_point(left_ori, right_ori, he_bc.next().id);
-            if constexpr (N == 2) {
-                trace_from_edge(he_ca.twin().id, dir_data, end_vid);
-            } else {
-                auto dir = Vector2d::Map(dir_data);
-                Vector2d new_dir = complex_div(dir, pc - pa).normalized();
-                trace_from_edge(he_ca.twin().id, new_dir.data(), end_vid);
-            }
-        }
-    };
-
-    if constexpr (N == 2) {
-        auto mid_pt = Vec::Map(edge_points.back().pt.data());
-        auto pa = Vec::Map(he_ab.from().prop().pt.data());
-        auto pb = Vec::Map(he_ab.to().prop().pt.data());
-        auto pc = Vec::Map(he_bc.to().prop().pt.data());
-        auto pd = Vec::Map(mesh->vertex(end_vid).prop().pt.data());
-        trace_next(mid_pt, pa, pb, pc, pd);
-    } else {
+    Eigen::Vector2d dir = Eigen::Vector2d::Map(dir_data);
+    while(true) {
+        auto he_ab = mesh->halfedge(hab);
         auto he_bc = he_ab.next();
-        auto he_ca = he_bc.next();
-        auto lab = origin_edge_lengths[he_ab.edge().id.idx];
-        auto lbc = origin_edge_lengths[he_bc.edge().id.idx];
-        auto lca = origin_edge_lengths[he_ca.edge().id.idx];
-
-        Vector2d pa{0.0, 0.0};
-        Vector2d pb{lab, 0.0};
-        Vector2d pc = triangle_oppo_point(lab, lbc, lca, false);
-        double t = edge_points.back().t;
-        if (he_ab.edge().halfedge().id != he_ab.id) {
-            t = 1.0 - t;
+        if (he_bc.to().id == end_vid) {
+            path.emplace_back(end_vid);
+            path_on_face_vec.emplace_back(he_bc.face().id);
+            return;
         }
-        Vector2d mid_pt{ pa * (1.0 - t) + pb * t };
-        auto dir = Vector2d::Map(dir_data);
-        Vector2d pd = mid_pt + dir;
-        trace_next(mid_pt, pa, pb, pc, pd);
+        auto trace_next = [this, &dir, &hab, &he_bc](const auto& mid_pt, const auto& pa, const auto& pb, const auto& pc, const auto& pd) {
+            auto vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc.data());
+            if (vc_ori > 0.0) {
+                auto right_ori = predicates::orient2d(mid_pt.data(), pb.data(), pd.data());
+                assert(right_ori > 0.0);
+                add_intersection_point(vc_ori, right_ori, he_bc.id);
+                if constexpr (N == 3) {
+                    dir = complex_div(dir, pb - pc).normalized();
+                }
+                hab = he_bc.twin().id;
+            } else {
+                auto right_ori = -vc_ori;
+                auto left_ori = predicates::orient2d(mid_pt.data(), pd.data(), pa.data());
+                assert(left_ori > 0.0);
+                auto he_ca = he_bc.next();
+                add_intersection_point(left_ori, right_ori, he_bc.next().id);
+                if constexpr (N == 3) {
+                    dir = complex_div(dir, pc - pa).normalized();
+                }
+                hab = he_ca.twin().id;
+            }
+        };
+        if constexpr (N == 2) {
+            auto mid_pt = Vec::Map(edge_points.back().pt.data());
+            auto pa = Vec::Map(he_ab.from().prop().pt.data());
+            auto pb = Vec::Map(he_ab.to().prop().pt.data());
+            auto pc = Vec::Map(he_bc.to().prop().pt.data());
+            auto pd = Vec::Map(mesh->vertex(end_vid).prop().pt.data());
+            trace_next(mid_pt, pa, pb, pc, pd);
+        } else {
+            auto he_bc = he_ab.next();
+            auto he_ca = he_bc.next();
+            auto lab = origin_edge_lengths[he_ab.edge().id.idx];
+            auto lbc = origin_edge_lengths[he_bc.edge().id.idx];
+            auto lca = origin_edge_lengths[he_ca.edge().id.idx];
+
+            Vector2d pa{0.0, 0.0};
+            Vector2d pb{lab, 0.0};
+            Vector2d pc = triangle_oppo_point(lab, lbc, lca, false);
+            double t = edge_points.back().t;
+            if (he_ab.edge().halfedge().id != he_ab.id) {
+                t = 1.0 - t;
+            }
+            Vector2d mid_pt{ pa * (1.0 - t) + pb * t };
+            Vector2d pd = mid_pt + dir;
+            trace_next(mid_pt, pa, pb, pc, pd);
+        }
     }
 }
 
@@ -965,7 +959,7 @@ auto project_polylines_on_mesh(
     auto point_vertices = detail::project_points_on_mesh(points, mesh, EPS, face_parent_map, edge_parent_map);
     detail::AuxiliaryMesh aux_mesh;
     aux_mesh.copy_from(mesh);
-    gpf::update_edge_lengths<N>(aux_mesh, [mesh](auto v) {
+    gpf::update_edge_lengths<N>(aux_mesh, [&mesh](auto v) {
         return std::span<const double, N>{mesh.vertex_prop(v.id).pt};
     });
     gpf::update_corner_angles(aux_mesh);
@@ -1000,8 +994,8 @@ auto project_polylines_on_mesh(
         for (std::size_t i = 0; i + 1 < polyline.size(); i++) {
             auto va = point_vertices[polyline[i]];
             auto vb = point_vertices[polyline[i + 1]];
-            if (va.idx == 5735 && vb.idx == 5734) {
-                const auto a = 2;
+            if (va == vb) {
+                continue;
             }
             auto local_path =
                 flip_geodesic.perform(detail::shortest_patch_by_dijksta(aux_mesh, va, vb,
