@@ -1,22 +1,24 @@
 #include "read_off.hpp"
 #include <algorithm>
 #include <array>
+#include <fstream>
 #include <gpf/detail.hpp>
 #include <gpf/ids.hpp>
-#include <gpf/surface_mesh.hpp>
 #include <gpf/mesh_property.hpp>
 #include <gpf/mesh_upkeep.hpp>
-#include <fstream>
+#include <gpf/project_polylines_on_mesh.hpp>
+#include <gpf/surface_mesh.hpp>
 #include <iomanip>
 #include <queue>
 #include <utility>
 #include <vector>
-#include <gpf/project_polylines_on_mesh.hpp>
 
 #include <Eigen/Dense>
 
-template <typename Mesh>
-void write_off(const std::string& path, const std::vector<std::array<double, 3>>& vertices, const Mesh& mesh) {
+template<typename Mesh>
+void
+write_off(const std::string& path, const std::vector<std::array<double, 3>>& vertices, const Mesh& mesh)
+{
     std::ofstream out(path);
     std::size_t n_triangles = 0;
     for (const auto& f : mesh.faces()) {
@@ -24,7 +26,8 @@ void write_off(const std::string& path, const std::vector<std::array<double, 3>>
         for (const auto he : f.halfedges()) {
             face_vertices.push_back(he.from().id.idx);
         }
-        if (face_vertices.size() >= 3) n_triangles += face_vertices.size() - 2;
+        if (face_vertices.size() >= 3)
+            n_triangles += face_vertices.size() - 2;
     }
     out << "OFF\n";
     out << vertices.size() << ' ' << n_triangles << " 0\n";
@@ -41,14 +44,15 @@ void write_off(const std::string& path, const std::vector<std::array<double, 3>>
             const auto a = 2;
         }
         for (std::size_t i = 1; i + 1 < face_vertices.size(); ++i) {
-            out << "3 " << face_vertices[0] << ' ' << face_vertices[i] << ' ' << face_vertices[i + 1]
-                << '\n';
+            out << "3 " << face_vertices[0] << ' ' << face_vertices[i] << ' ' << face_vertices[i + 1] << '\n';
         }
     }
 }
 
-template <typename Mesh>
-void write_boundary_points_off(const std::string& path, const Mesh& mesh) {
+template<typename Mesh>
+void
+write_boundary_points_off(const std::string& path, const Mesh& mesh)
+{
     std::vector<std::array<double, 3>> boundary_pts;
     for (const auto& v : mesh.vertices()) {
         if (v.prop().on_boundary) {
@@ -64,10 +68,12 @@ void write_boundary_points_off(const std::string& path, const Mesh& mesh) {
     }
 }
 
-template <typename Mesh>
-void write_non_manifold_edges_obj(const std::string& path,
-                                  const std::vector<std::array<double, 3>>& vertices,
-                                  const Mesh& mesh) {
+template<typename Mesh>
+void
+write_non_manifold_edges_obj(const std::string& path,
+                             const std::vector<std::array<double, 3>>& vertices,
+                             const Mesh& mesh)
+{
     std::ofstream out(path);
     out << std::setprecision(17);
     for (const auto& v : vertices) {
@@ -87,8 +93,10 @@ void write_non_manifold_edges_obj(const std::string& path,
     }
 }
 
-template <typename Mesh>
-void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
+template<typename Mesh>
+void
+collapse_degenerate_triangles(Mesh& mesh, const double tol)
+{
     using namespace gpf;
     std::array<HalfedgeId, 3> tri_halfedges;
     std::array<double, 3> tri_edge_lengths;
@@ -116,7 +124,9 @@ void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
                 max_idx = i;
             }
         }
-        return std::make_pair(tri_halfedges[max_idx], tri_edge_lengths[(max_idx + 1) % 3] + tri_edge_lengths[(max_idx + 2) % 3] - tri_edge_lengths[max_idx]);
+        return std::make_pair(tri_halfedges[max_idx],
+                              tri_edge_lengths[(max_idx + 1) % 3] + tri_edge_lengths[(max_idx + 2) % 3] -
+                                tri_edge_lengths[max_idx]);
     };
 
     std::unordered_set<VertexId> vc_oppo_vertices;
@@ -143,7 +153,6 @@ void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
         auto vc = mesh.he_to(he_bc);
         auto he_ca = mesh.he_next(he_bc);
         auto va = mesh.he_to(he_ca);
-
 
         auto pa = Eigen::Vector3d::Map(mesh.vertex_prop(va).pt.data());
         auto pb = Eigen::Vector3d::Map(mesh.vertex_prop(vb).pt.data());
@@ -184,19 +193,20 @@ void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
             }
         }
 
-        if (std::ranges::any_of(mesh.vertex(target_vid).edges(), [&mesh, &vc_oppo_vertices, target_vid, collpase_eid](auto e) {
-            auto [v1, v2] = mesh.e_vertices(e.id);
-            const VertexId target_vid_oppo = v1 == target_vid ? v2 : v1;
-            if (vc_oppo_vertices.contains(target_vid_oppo)) {
-                for (const auto he : mesh.edge(collpase_eid).halfedges()) {
-                    if (he.next().to().id == target_vid_oppo) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-            return false;
-        })) {
+        if (std::ranges::any_of(mesh.vertex(target_vid).edges(),
+                                [&mesh, &vc_oppo_vertices, target_vid, collpase_eid](auto e) {
+                                    auto [v1, v2] = mesh.e_vertices(e.id);
+                                    const VertexId target_vid_oppo = v1 == target_vid ? v2 : v1;
+                                    if (vc_oppo_vertices.contains(target_vid_oppo)) {
+                                        for (const auto he : mesh.edge(collpase_eid).halfedges()) {
+                                            if (he.next().to().id == target_vid_oppo) {
+                                                return false;
+                                            }
+                                        }
+                                        return true;
+                                    }
+                                    return false;
+                                })) {
             continue;
         }
 
@@ -221,8 +231,10 @@ void collapse_degenerate_triangles(Mesh &mesh, const double tol) {
     }
 }
 
-template <typename Mesh>
-void split_long_edges(Mesh& mesh, const double max_edge_len) {
+template<typename Mesh>
+void
+split_long_edges(Mesh& mesh, const double max_edge_len)
+{
     using namespace gpf;
     std::priority_queue<std::pair<double, EdgeId>> queue;
     for (const auto e : mesh.edges()) {
@@ -231,7 +243,7 @@ void split_long_edges(Mesh& mesh, const double max_edge_len) {
             queue.emplace(edge_len, e.id);
         }
     }
-    while(!queue.empty()) {
+    while (!queue.empty()) {
         auto [edge_len, eid] = queue.top();
         queue.pop();
         if (edge_len != mesh.edge_prop(eid).len) {
@@ -240,12 +252,15 @@ void split_long_edges(Mesh& mesh, const double max_edge_len) {
 
         auto [va, vb] = mesh.e_vertices(eid);
         const auto new_vid = mesh.split_edge(eid);
-        Eigen::Vector3d::Map(mesh.vertex_prop(new_vid).pt.data()) = (Eigen::Vector3d::Map(mesh.vertex_prop(va).pt.data()) + Eigen::Vector3d::Map(mesh.vertex_prop(vb).pt.data())) * 0.5;
+        Eigen::Vector3d::Map(mesh.vertex_prop(new_vid).pt.data()) =
+          (Eigen::Vector3d::Map(mesh.vertex_prop(va).pt.data()) +
+           Eigen::Vector3d::Map(mesh.vertex_prop(vb).pt.data())) *
+          0.5;
 
         auto new_v_he = mesh.vertex(new_vid).halfedge();
         const auto half_edge_len = edge_len * 0.5;
         new_v_he.edge().prop().len = half_edge_len;
-        new_v_he.prev().edge().prop().len  = half_edge_len;
+        new_v_he.prev().edge().prop().len = half_edge_len;
 
         for (auto he : mesh.edge(eid).halfedges()) {
             VertexId vc{};
@@ -268,11 +283,10 @@ void split_long_edges(Mesh& mesh, const double max_edge_len) {
     }
 }
 
-template <typename Mesh>
-void identify_boundary_points(
-    const OffData& boundary_mesh,
-    Mesh& mesh
-) {
+template<typename Mesh>
+void
+identify_boundary_points(const OffData& boundary_mesh, Mesh& mesh)
+{
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
     using Point_3 = Kernel::Point_3;
     using Triangle_3 = Kernel::Triangle_3;
@@ -285,8 +299,8 @@ void identify_boundary_points(
     triangles.reserve(mesh.n_faces());
 
     std::array<Point_3, 3> tri;
-    for (const auto& indices: boundary_mesh.faces) {
-        for (std::size_t i = 0; i < std::size_t{3}; ++i) {
+    for (const auto& indices : boundary_mesh.faces) {
+        for (std::size_t i = 0; i < std::size_t{ 3 }; ++i) {
             const auto& p = boundary_mesh.vertices[indices[i]];
             tri[i] = Point_3(p[0], p[1], p[2]);
         }
@@ -310,10 +324,9 @@ void identify_boundary_points(
 }
 
 template<typename Mesh>
-void smooth_faces(
-    const std::size_t n_smooths,
-    Mesh& mesh
-) {
+void
+smooth_faces(const std::size_t n_smooths, Mesh& mesh)
+{
     using Vec3 = Eigen::Vector3d;
     std::vector<std::array<double, 3>> cache_points(mesh.n_vertices_capacity());
     std::vector<gpf::VertexId> patch_interior_vertices;
@@ -349,16 +362,20 @@ void smooth_faces(
         }
     }
 }
-void test_mesh_edge_collapse1() {
+void
+test_mesh_edge_collapse1()
+{
     using namespace gpf;
     auto data = read_off("clip_material_1.off");
-    struct VertexProp {
+    struct VertexProp
+    {
         std::array<double, 3> pt;
-        bool on_boundary {false};
+        bool on_boundary{ false };
     };
-    struct EdgeProp {
+    struct EdgeProp
+    {
         double len;
-        bool need_update{false};
+        bool need_update{ false };
     };
     using Mesh = gpf::SurfaceMesh<VertexProp, Empty, EdgeProp>;
     auto mesh = Mesh::new_in(data.faces);
@@ -367,7 +384,7 @@ void test_mesh_edge_collapse1() {
     }
     gpf::update_edge_lengths<3>(mesh);
     {
-        auto eid = mesh.e_from_vertices(gpf::VertexId{1180}, gpf::VertexId{1182});
+        auto eid = mesh.e_from_vertices(gpf::VertexId{ 1180 }, gpf::VertexId{ 1182 });
         auto len = mesh.edge_prop(eid).len;
         const auto a = 2;
     }
@@ -398,7 +415,7 @@ void test_mesh_edge_collapse1() {
     smooth_faces(100, mesh);
     data.vertices.resize(mesh.n_vertices_capacity());
     for (std::size_t i = 0; i < mesh.n_vertices_capacity(); i++) {
-        data.vertices[i] = mesh.vertex_prop(VertexId{i}).pt;
+        data.vertices[i] = mesh.vertex_prop(VertexId{ i }).pt;
     }
     write_off("material_1_smooth.off", data.vertices, mesh);
 

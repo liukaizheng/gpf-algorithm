@@ -1,17 +1,20 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <concepts>
+#include <cstddef>
 #include <functional>
 #include <limits>
 #include <numeric>
 #include <queue>
+#include <ranges>
+#include <span>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
-#include <array>
-#include <span>
-#include <ranges>
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -19,31 +22,36 @@
 #include <predicates/predicates.hpp>
 
 #include <gpf/mesh.hpp>
-#include <gpf/triangulation.hpp>
 #include <gpf/mesh_property.hpp>
+#include <gpf/triangulation.hpp>
 
+#include <CGAL/AABB_traits_2.h>
 #include <CGAL/AABB_traits_3.h>
 #include <CGAL/AABB_tree.h>
+#include <CGAL/AABB_triangle_primitive_2.h>
 #include <CGAL/AABB_triangle_primitive_3.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 
-namespace gpf{
+namespace gpf {
 namespace detail {
 namespace views = std::views;
 namespace ranges = std::ranges;
 using Vector2d = Eigen::Vector2d;
-
-// Complex division: treat 2D vectors as complex numbers (x + yi)
-inline Vector2d complex_div(const Vector2d& a, const Vector2d& b) {
-    double denom = b.squaredNorm();
-    return Vector2d{
-        (a.x() * b.x() + a.y() * b.y()) / denom,
-        (a.y() * b.x() - a.x() * b.y()) / denom
-    };
-}
 using Vector3d = Eigen::Vector3d;
 
-inline std::vector<double> compute_bary_coordinates(const std::span<const double> points) {
+template<std::size_t N>
+using VectorNd = Eigen::Vector<double, static_cast<int>(N)>;
+
+// Complex division: treat 2D vectors as complex numbers (x + yi)
+inline Vector2d
+complex_div(const Vector2d& a, const Vector2d& b)
+{
+    double denom = b.squaredNorm();
+    return Vector2d{ (a.x() * b.x() + a.y() * b.y()) / denom, (a.y() * b.x() - a.x() * b.y()) / denom };
+}
+inline std::vector<double>
+compute_bary_coordinates(const std::span<const double> points)
+{
     auto pa = Vector2d::Map(points.data());
     auto pb = Vector2d::Map(points.data() + 2);
     auto pc = Vector2d::Map(points.data() + 4);
@@ -69,16 +77,34 @@ inline std::vector<double> compute_bary_coordinates(const std::span<const double
     return bary_coords;
 }
 
-struct CCS3d {
+template<std::size_t N>
+struct FaceCoords;
+
+template<>
+struct FaceCoords<2>
+{
+    FaceCoords() noexcept = default;
+
+    std::array<double, 2> uv(const std::span<const double, 2> pt) const noexcept { return { pt[0], pt[1] }; }
+};
+
+template<>
+struct FaceCoords<3>
+{
     std::array<double, 9> data;
-    CCS3d() noexcept = default;
-    CCS3d(std::array<double, 9>&& data) noexcept : data(std::move(data)) {}
-    CCS3d(auto& mesh, const gpf::FaceId fid) noexcept {
+    FaceCoords() noexcept = default;
+    FaceCoords(std::array<double, 9>&& data) noexcept
+      : data(std::move(data))
+    {
+    }
+    FaceCoords(const auto& mesh, const gpf::FaceId fid) noexcept
+    {
         auto face = mesh.face(fid);
-        auto face_vertices = face.halfedges() | views::transform([](auto he) { return he.to().id; }) | ranges::to<std::vector>();
-        const auto pa = Vector3d::Map(mesh.vertex_prop(face_vertices[0]).pt.data());
-        const auto pb = Vector3d::Map(mesh.vertex_prop(face_vertices[1]).pt.data());
-        const auto pc = Vector3d::Map(mesh.vertex_prop(face_vertices[2]).pt.data());
+        auto face_vertices =
+          face.halfedges() | views::transform([](auto he) { return he.to().id; }) | ranges::to<std::vector>();
+        const auto pa = Eigen::Vector3d::Map(mesh.vertex_prop(face_vertices[0]).pt.data());
+        const auto pb = Eigen::Vector3d::Map(mesh.vertex_prop(face_vertices[1]).pt.data());
+        const auto pc = Eigen::Vector3d::Map(mesh.vertex_prop(face_vertices[2]).pt.data());
 
         auto o = Vector3d::Map(data.data());
         auto x = Vector3d::Map(data.data() + 3);
@@ -89,53 +115,59 @@ struct CCS3d {
         y = z.cross(x).normalized();
     }
 
-    Eigen::Vector2d uv(const double* pt) const noexcept {
+    std::array<double, 2> uv(const std::span<const double, 3> pt) const noexcept
+    {
         auto o = Vector3d::Map(data.data());
         auto x = Vector3d::Map(data.data() + 3);
         auto y = Vector3d::Map(data.data() + 6);
-        auto v = (Vector3d::Map(pt) - o).eval();
-        return {v.dot(x), v.dot(y)};
+        auto v = (Eigen::Vector3d::Map(pt.data()) - o).eval();
+        return { v.dot(x), v.dot(y) };
     }
 };
 
-struct FaceInfo {
-    CCS3d ccs;
+template<std::size_t N, typename Mesh>
+FaceCoords<N>
+make_face_coords(Mesh& mesh, const gpf::FaceId fid) noexcept
+{
+    if constexpr (N == 3) {
+        return FaceCoords<N>(mesh, fid);
+    } else {
+        return FaceCoords<N>{};
+    }
+}
+
+template<std::size_t N>
+struct FaceInfo
+{
+    FaceCoords<N> ccs;
     std::vector<std::size_t> point_indices;
 };
 
-template<typename Mesh>
-auto identify_points(
-    Mesh& mesh,
-    const gpf::FaceId fid,
-    std::vector<std::array<double, 3>>& all_points,
-    std::unordered_map<gpf::EdgeId, std::vector<std::size_t>>& edge_to_points_map,
-    std::vector<std::size_t>& face_point_indices,
-    std::vector<gpf::VertexId>& point_vertices,
-    const double eps
-) {
+template<std::size_t N, typename Mesh>
+auto
+identify_points(Mesh& mesh,
+                const gpf::FaceId fid,
+                std::vector<std::array<double, N>>& all_points,
+                std::unordered_map<gpf::EdgeId, std::vector<std::size_t>>& edge_to_points_map,
+                std::vector<std::size_t>& face_point_indices,
+                std::vector<gpf::VertexId>& point_vertices,
+                const double eps)
+{
     auto face = mesh.face(fid);
-    auto face_halfedges = face.halfedges() | views::transform([](auto he) { return he.id; }) | ranges::to<std::vector>();
-    auto face_vertices = face_halfedges | views::transform([&mesh](auto hid) { return mesh.halfedge(hid).to().id; }) | ranges::to<std::vector>();
-    const auto pa = Vector3d::Map(mesh.vertex_prop(face_vertices[0]).pt.data());
-    const auto pb = Vector3d::Map(mesh.vertex_prop(face_vertices[1]).pt.data());
-    const auto pc = Vector3d::Map(mesh.vertex_prop(face_vertices[2]).pt.data());
-
-    std::array<double, 9> ccs_data;
-    auto o = Vector3d::Map(ccs_data.data());
-    auto x = Vector3d::Map(ccs_data.data() + 3);
-    auto y = Vector3d::Map(ccs_data.data() + 6);
-    o = pa;
-    x = (pb - o).normalized();
-    auto z = x.cross((pc - o)).normalized();
-    y = z.cross(x).normalized();
-
-    auto ccs = CCS3d{std::move(ccs_data)};
+    auto face_halfedges =
+      face.halfedges() | views::transform([](auto he) { return he.id; }) | ranges::to<std::vector>();
+    auto face_vertices = face_halfedges | views::transform([&mesh](auto hid) { return mesh.halfedge(hid).to().id; }) |
+                         ranges::to<std::vector>();
+    auto ccs = make_face_coords<N>(mesh, fid);
     std::vector<double> uvs((3 + face_point_indices.size()) * 2, 0.0);
-    Vector2d::Map(uvs.data() + 2) = ccs.uv(pb.data());
-    Vector2d::Map(uvs.data() + 4) = ccs.uv(pc.data());
+    if constexpr (N == 2) {
+        Vector2d::Map(uvs.data()) = Vector2d::Map(ccs.uv(mesh.vertex_prop(face_vertices[0]).pt).data());
+    }
+    Vector2d::Map(uvs.data() + 2) = Vector2d::Map(ccs.uv(mesh.vertex_prop(face_vertices[1]).pt).data());
+    Vector2d::Map(uvs.data() + 4) = Vector2d::Map(ccs.uv(mesh.vertex_prop(face_vertices[2]).pt).data());
     std::size_t idx = 6;
     for (const auto pid : face_point_indices) {
-        Vector2d::Map(uvs.data() + idx) = ccs.uv(all_points[pid].data());
+        Vector2d::Map(uvs.data() + idx) = Vector2d::Map(ccs.uv(all_points[pid]).data());
         idx += 2;
     }
     auto bary_coords = compute_bary_coordinates(uvs);
@@ -162,8 +194,8 @@ auto identify_points(
 
             auto sum = bary_coord[j] + bary_coord[k];
             auto t = bary_coord[j] / sum;
-            Vector3d::Map(all_points[pid].data()) =
-                t * Vector3d::Map(mesh.vertex_prop(v1).pt.data()) + (1.0 - t) * Vector3d::Map(mesh.vertex_prop(v2).pt.data());
+            VectorNd<N>::Map(all_points[pid].data()) = t * VectorNd<N>::Map(mesh.vertex_prop(v1).pt.data()) +
+                                                       (1.0 - t) * VectorNd<N>::Map(mesh.vertex_prop(v2).pt.data());
             edge_to_points_map[eid].emplace_back(pid);
         } else {
             if (idx != i) {
@@ -176,17 +208,16 @@ auto identify_points(
     return ccs;
 }
 
-
-template<typename Mesh, typename PointAccessor>
-void split_edge_by_points(
-    Mesh& mesh,
-    const gpf::EdgeId eid,
-    PointAccessor&& get_point,
-    const std::vector<std::size_t>& edge_point_indices,
-    std::vector<gpf::VertexId>& point_vertices,
-    const double eps,
-    std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr
-) {
+template<std::size_t N, typename Mesh, typename PointAccessor>
+void
+split_edge_by_points(Mesh& mesh,
+                     const gpf::EdgeId eid,
+                     PointAccessor&& get_point,
+                     const std::vector<std::size_t>& edge_point_indices,
+                     std::vector<gpf::VertexId>& point_vertices,
+                     const double eps,
+                     std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr)
+{
     // Find the root parent for this edge
     auto get_root_parent = [&edge_parent_map](gpf::EdgeId e) {
         gpf::EdgeId root = e;
@@ -216,16 +247,17 @@ void split_edge_by_points(
         const auto [va, vb] = mesh.he_vertices(curr_hid);
         const auto pa = mesh.vertex_prop(va).pt;
         const auto pb = mesh.vertex_prop(vb).pt;
-        const auto pa_ref = Vector3d::Map(pa.data());
-        const auto pb_ref = Vector3d::Map(pb.data());
+        const auto pa_ref = VectorNd<N>::Map(pa.data());
+        const auto pb_ref = VectorNd<N>::Map(pb.data());
         auto edge_len = (pb_ref - pa_ref).norm();
         std::vector<std::size_t> indices(edge_point_indices.size());
         std::iota(indices.begin(), indices.end(), 0);
         const auto distances = edge_point_indices |
-            std::views::transform([pa_ref, edge_len, &get_point](const auto pid) {
-                auto pt = get_point(pid);
-                return (Vector3d::Map(pt.data()) - pa_ref).norm() / edge_len;
-            }) | std::ranges::to<std::vector>();
+                               std::views::transform([pa_ref, edge_len, &get_point](const auto pid) {
+                                   auto pt = get_point(pid);
+                                   return (VectorNd<N>::Map(pt.data()) - pa_ref).norm() / edge_len;
+                               }) |
+                               std::ranges::to<std::vector>();
 
         std::sort(indices.begin(), indices.end(), [&distances](auto i, auto j) { return distances[i] < distances[j]; });
         const auto root_parent = get_root_parent(eid);
@@ -253,20 +285,20 @@ void split_edge_by_points(
         }
     }
 }
-template<typename Mesh>
-void triangulate_on_face(
-    Mesh& mesh,
-    const gpf::FaceId fid,
-    const std::vector<std::array<double, 3>>& all_points,
-    const CCS3d& ccs,
-    const std::vector<std::size_t>& point_indices,
-    const std::vector<gpf::VertexId>& cross_edge_vertices,
-    std::vector<gpf::VertexId>& point_vertices,
-    std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr
-) {
-    auto face_vertices = mesh.face(fid).halfedges() |
-        views::transform([](const auto& he) { return he.to().id; }) |
-        ranges::to<std::vector>();
+
+template<std::size_t N, typename Mesh>
+void
+triangulate_on_face(Mesh& mesh,
+                    const gpf::FaceId fid,
+                    const std::span<const std::array<double, N>> all_points,
+                    const FaceCoords<N>& ccs,
+                    const std::vector<std::size_t>& point_indices,
+                    const std::vector<gpf::VertexId>& cross_edge_vertices,
+                    std::vector<gpf::VertexId>& point_vertices,
+                    std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr)
+{
+    auto face_vertices = mesh.face(fid).halfedges() | views::transform([](const auto& he) { return he.to().id; }) |
+                         ranges::to<std::vector>();
 
     std::unordered_map<gpf::VertexId, std::size_t> vertex_indices;
     for (auto vid : cross_edge_vertices) {
@@ -282,11 +314,13 @@ void triangulate_on_face(
     const auto n_old_face_vertices = face_vertices.size();
     const auto n_old_vertices = mesh.n_vertices_capacity();
     mesh.new_vertices(point_indices.size());
-    face_vertices.append_range(ranges::iota_view{n_old_vertices, mesh.n_vertices_capacity()} | views::transform([](const auto idx) { return gpf::VertexId{idx}; }));
+    face_vertices.append_range(ranges::iota_view{ n_old_vertices, mesh.n_vertices_capacity() } |
+                               views::transform([](const auto idx) { return gpf::VertexId{ idx }; }));
     if (face_vertices.size() == 3) {
         return;
     }
-    for (auto [pid, vid] : views::zip(point_indices, ranges::drop_view{face_vertices, static_cast<std::ptrdiff_t>(n_old_face_vertices)})) {
+    for (auto [pid, vid] : views::zip(
+           point_indices, ranges::drop_view{ face_vertices, static_cast<std::ptrdiff_t>(n_old_face_vertices) })) {
         mesh.vertex_prop(vid).pt = all_points[pid];
         point_vertices[pid] = vid;
     }
@@ -295,7 +329,7 @@ void triangulate_on_face(
     std::size_t idx = 0;
     for (auto vid : face_vertices) {
         const auto& pt = mesh.vertex_prop(vid).pt;
-        Vector2d::Map(points.data() + idx) = ccs.uv(pt.data());
+        Vector2d::Map(points.data() + idx) = Vector2d::Map(ccs.uv(pt).data());
         idx += 2;
     }
 
@@ -306,10 +340,13 @@ void triangulate_on_face(
         segments.push_back((i + 1) % n_old_face_vertices);
     }
 
-    segments.append_range(cross_edge_vertices | views::transform([&vertex_indices] (const auto vid) { return vertex_indices[vid]; }));
+    segments.append_range(cross_edge_vertices |
+                          views::transform([&vertex_indices](const auto vid) { return vertex_indices[vid]; }));
 
     const auto triangle_indices = gpf::triangulate_polygon(points, segments, n_old_face_vertices, true);
-    auto triangles = triangle_indices | views::transform([&face_vertices] (const auto idx) { return face_vertices[idx];}) | ranges::to<std::vector>();
+    auto triangles = triangle_indices |
+                     views::transform([&face_vertices](const auto idx) { return face_vertices[idx]; }) |
+                     ranges::to<std::vector>();
     assert(!triangles.empty());
 
     const auto n_faces_before = mesh.n_faces_capacity();
@@ -327,52 +364,61 @@ void triangulate_on_face(
         (*face_parent_map)[fid] = root_parent;
         // New faces are created starting from n_faces_before
         for (std::size_t i = n_faces_before; i < mesh.n_faces_capacity(); ++i) {
-            (*face_parent_map)[gpf::FaceId{i}] = root_parent;
+            (*face_parent_map)[gpf::FaceId{ i }] = root_parent;
         }
     }
 }
 
-template<typename VP, typename HP, typename EP, typename FP>
-auto project_points_on_mesh(
-    std::vector<std::array<double, 3>>& points,
-    gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
-    const double eps,
-    std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
-    std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr
-) {
+template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
+auto
+project_points_on_mesh(std::vector<std::array<double, N>>& points,
+                       gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
+                       const double eps,
+                       std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
+                       std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr)
+{
+    static_assert(N == 2 || N == 3);
+
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
-    using Point_3 = Kernel::Point_3;
-    using Triangle_3 = Kernel::Triangle_3;
-    using TreeIterator = std::vector<Triangle_3>::const_iterator;
-    using TreePrimitive = CGAL::AABB_triangle_primitive_3<Kernel, TreeIterator>;
-    using TreeTraits = CGAL::AABB_traits_3<Kernel, TreePrimitive>;
+    using Point = std::conditional_t<N == 2, Kernel::Point_2, Kernel::Point_3>;
+    using Triangle = std::conditional_t<N == 2, Kernel::Triangle_2, Kernel::Triangle_3>;
+    using TreeIterator = std::vector<Triangle>::const_iterator;
+    using TreePrimitive = std::conditional_t<N == 2,
+                                             CGAL::AABB_triangle_primitive_2<Kernel, TreeIterator>,
+                                             CGAL::AABB_triangle_primitive_3<Kernel, TreeIterator>>;
+    using TreeTraits = std::
+      conditional_t<N == 2, CGAL::AABB_traits_2<Kernel, TreePrimitive>, CGAL::AABB_traits_3<Kernel, TreePrimitive>>;
     using Tree = CGAL::AABB_tree<TreeTraits>;
 
-    std::vector<Triangle_3> triangles;
+    auto to_kernel_point = [](const std::array<double, N>& pt) {
+        if constexpr (N == 2) {
+            return Point(pt[0], pt[1]);
+        } else {
+            return Point(pt[0], pt[1], pt[2]);
+        }
+    };
+
+    std::vector<Triangle> triangles;
     std::vector<gpf::FaceId> face_ids;
     triangles.reserve(mesh.n_faces());
     face_ids.reserve(mesh.n_faces());
 
-    std::array<Point_3, 3> tri;
     for (auto face : mesh.faces()) {
         auto he = face.halfedge();
-        for (std::size_t i = 0; i < 3ul; ++i) {
-            const auto& p = he.to().prop().pt;
-            tri[i] = Point_3(p[0], p[1], p[2]);
-            he = he.next();
-        }
-        triangles.push_back(Triangle_3(tri[0], tri[1], tri[2]));
+        const auto& pa = he.to().prop().pt;
+        he = he.next();
+        const auto& pb = he.to().prop().pt;
+        he = he.next();
+        const auto& pc = he.to().prop().pt;
+        triangles.emplace_back(to_kernel_point(pa), to_kernel_point(pb), to_kernel_point(pc));
         face_ids.emplace_back(face.id);
     }
 
     Tree tree(triangles.begin(), triangles.end());
     tree.accelerate_distance_queries();
-    std::unordered_map<gpf::FaceId, FaceInfo> face_info_map;
+    std::unordered_map<gpf::FaceId, FaceInfo<N>> face_info_map;
     for (std::size_t pid = 0; pid < points.size(); pid++) {
-        const auto& pt = points[pid];
-        Point_3 p(pt[0], pt[1], pt[2]);
-
-        auto closest_ret = tree.closest_point_and_primitive(p);
+        auto closest_ret = tree.closest_point_and_primitive(to_kernel_point(points[pid]));
         auto fid = face_ids[std::distance(triangles.cbegin(), closest_ret.second)];
         face_info_map[fid].point_indices.emplace_back(pid);
     }
@@ -380,47 +426,65 @@ auto project_points_on_mesh(
     std::vector<gpf::VertexId> point_vertices(points.size(), gpf::VertexId{});
     std::unordered_map<gpf::EdgeId, std::vector<std::size_t>> edge_to_points_map;
     for (auto& [fid, info] : face_info_map) {
-        info.ccs = identify_points(mesh, fid, points, edge_to_points_map, info.point_indices, point_vertices, eps);
+        info.ccs = identify_points<N>(mesh, fid, points, edge_to_points_map, info.point_indices, point_vertices, eps);
     }
 
     // add ccs for all triangles sharing this edge to prepare triangulation
     for (const auto eid : edge_to_points_map | views::keys) {
         for (const auto he : mesh.edge(eid).halfedges()) {
             const auto fid = he.face().id;
-            if (face_info_map.find(fid) == face_info_map.end()) {
-                face_info_map.emplace(fid, FaceInfo{.ccs = CCS3d(mesh, fid)});
+            if (fid.valid() && face_info_map.find(fid) == face_info_map.end()) {
+                face_info_map.emplace(fid, FaceInfo<N>{ .ccs = make_face_coords<N>(mesh, fid) });
             }
         }
     }
 
     for (const auto& [eid, point_indices] : edge_to_points_map) {
-        split_edge_by_points(mesh, eid, [&points](std::size_t pid) { return points[pid]; }, point_indices, point_vertices, eps, edge_parent_map);
+        split_edge_by_points<N>(
+          mesh,
+          eid,
+          [&points](std::size_t pid) { return points[pid]; },
+          point_indices,
+          point_vertices,
+          eps,
+          edge_parent_map);
     }
 
     for (const auto& [fid, info] : face_info_map) {
-        triangulate_on_face(mesh, fid, points, info.ccs, info.point_indices, {}, point_vertices, face_parent_map);
+        triangulate_on_face<N>(mesh,
+                               fid,
+                               std::span<const std::array<double, N>>{ points },
+                               info.ccs,
+                               info.point_indices,
+                               {},
+                               point_vertices,
+                               face_parent_map);
     }
     return point_vertices;
 }
 
-struct VertexProp {
+struct VertexProp
+{
     double angle_sum = 0.0;
 };
 
-struct EdgeProp {
+struct EdgeProp
+{
     double len = 0.0;
     bool locked = false;
     bool is_origin = true;
 };
 
-struct HalfedgeProp {
+struct HalfedgeProp
+{
     std::array<double, 2> vector;
     double angle = 0.0;
     double signpost_angle = 0.0;
     gpf::HalfedgeId path_prev{};
     gpf::HalfedgeId path_next{};
 
-    void unconnect() {
+    void unconnect()
+    {
         path_prev = {};
         path_next = {};
     }
@@ -429,16 +493,16 @@ struct HalfedgeProp {
 using AuxiliaryMesh = gpf::ManifoldMesh<VertexProp, HalfedgeProp, EdgeProp, gpf::Empty>;
 
 template<typename Mesh, typename IsLocked, typename GetEdgeLength>
-inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(
-    const Mesh& mesh,
-    const gpf::VertexId start_vid,
-    const gpf::VertexId end_vid,
-    IsLocked&& is_locked,
-    GetEdgeLength&& get_edge_length
-) {
-    for (const auto he :  mesh.vertex(start_vid).outgoing_halfedges()) {
+inline std::vector<gpf::HalfedgeId>
+shortest_patch_by_dijksta(const Mesh& mesh,
+                          const gpf::VertexId start_vid,
+                          const gpf::VertexId end_vid,
+                          IsLocked&& is_locked,
+                          GetEdgeLength&& get_edge_length)
+{
+    for (const auto he : mesh.vertex(start_vid).outgoing_halfedges()) {
         if (he.to().id == end_vid && !is_locked(he.edge())) {
-            return {he.id};
+            return { he.id };
         }
     }
 
@@ -449,7 +513,8 @@ inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(
         return vid == start_vid || incomindg_halfedges_map.find(vid) != incomindg_halfedges_map.end();
     };
 
-    auto enqueue_vertex_neighbors = [&mesh, &is_locked, &get_edge_length, &vertex_used, &pq](const gpf::VertexId vid, double dist) {
+    auto enqueue_vertex_neighbors = [&mesh, &is_locked, &get_edge_length, &vertex_used, &pq](const gpf::VertexId vid,
+                                                                                             double dist) {
         for (const auto he : mesh.vertex(vid).outgoing_halfedges()) {
             if (is_locked(he.edge())) {
                 continue;
@@ -463,7 +528,7 @@ inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(
     };
 
     enqueue_vertex_neighbors(start_vid, 0.0);
-    while(!pq.empty()) {
+    while (!pq.empty()) {
         auto [curr_dist, hid] = pq.top();
         pq.pop();
         auto vid = mesh.he_to(hid);
@@ -480,7 +545,7 @@ inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(
                 }
                 assert(incomindg_halfedges_map.find(vid) != incomindg_halfedges_map.end());
                 hid = incomindg_halfedges_map[vid];
-            } while(true);
+            } while (true);
             ranges::reverse(path);
             return path;
         }
@@ -490,36 +555,34 @@ inline std::vector<gpf::HalfedgeId> shortest_patch_by_dijksta(
     return {};
 }
 
-inline auto triangle_oppo_point(
-    const double lab,
-    const double lbc,
-    const double lca,
-    bool reversed
-) {
+inline auto
+triangle_oppo_point(const double lab, const double lbc, const double lca, bool reversed)
+{
     const auto h = gpf::triangle_area(lab, lbc, lca) / lab * 2.0;
     if (reversed) {
         auto w = (lbc * lbc + lab * lab - lca * lca) / lab * 0.5;
-        return Eigen::Vector2d{w, -h};
+        return Eigen::Vector2d{ w, -h };
     } else {
         const auto w = (lca * lca + lab * lab - lbc * lbc) / lab * 0.5;
-        return Eigen::Vector2d{w, h};
+        return Eigen::Vector2d{ w, h };
     }
 }
 
-struct FlipGeodesic {
-    enum class TurnDirection {
+struct FlipGeodesic
+{
+    enum class TurnDirection
+    {
         Left,
         Right
     };
-    struct Wedge {
+    struct Wedge
+    {
         double angle;
         std::array<gpf::VertexId, 3> vertices;
         gpf::HalfedgeId hid;
         TurnDirection dir;
 
-        auto operator<=>(const Wedge& other) const noexcept {
-            return angle <=> other.angle;
-        }
+        auto operator<=>(const Wedge& other) const noexcept { return angle <=> other.angle; }
         bool operator==(const Wedge& other) const noexcept = default;
     };
 
@@ -529,7 +592,9 @@ struct FlipGeodesic {
     void add_wedge(const gpf::HalfedgeId ha, const gpf::HalfedgeId hb);
     void shorten_locally();
     bool flip(const gpf::HalfedgeId hid) const;
-    void replace_path(std::vector<gpf::HalfedgeId>&& new_path, const gpf::HalfedgeId path_prev_prev_hid, const gpf::HalfedgeId path_next_next_hid);
+    void replace_path(std::vector<gpf::HalfedgeId>&& new_path,
+                      const gpf::HalfedgeId path_prev_prev_hid,
+                      const gpf::HalfedgeId path_next_next_hid);
 
     AuxiliaryMesh* mesh;
     std::priority_queue<Wedge, std::vector<Wedge>, std::greater<Wedge>> pq{};
@@ -538,14 +603,16 @@ struct FlipGeodesic {
     gpf::HalfedgeId path_start_hid{};
 };
 
-inline std::vector<gpf::HalfedgeId> FlipGeodesic::perform(std::vector<gpf::HalfedgeId>&& raw_path) {
+inline std::vector<gpf::HalfedgeId>
+FlipGeodesic::perform(std::vector<gpf::HalfedgeId>&& raw_path)
+{
     if (raw_path.size() == 1) {
         assert(!mesh->halfedge(raw_path.back()).edge().prop().locked);
         assert(mesh->halfedge(raw_path.back()).edge().prop().is_origin);
         return raw_path;
     }
     init_wedge_queue(raw_path);
-    while(!pq.empty()) {
+    while (!pq.empty()) {
         shorten_locally();
     }
     std::vector<gpf::HalfedgeId> result;
@@ -564,8 +631,9 @@ inline std::vector<gpf::HalfedgeId> FlipGeodesic::perform(std::vector<gpf::Halfe
     return result;
 }
 
-
-inline void FlipGeodesic::init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path) {
+inline void
+FlipGeodesic::init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path)
+{
     path_start_vid = mesh->he_from(raw_path.front());
     path_start_hid = raw_path.front();
     path_end_vid = mesh->he_to(raw_path.back());
@@ -578,7 +646,9 @@ inline void FlipGeodesic::init_wedge_queue(const std::vector<gpf::HalfedgeId>& r
     }
 }
 
-inline void FlipGeodesic::add_wedge(const gpf::HalfedgeId h1, const gpf::HalfedgeId h2) {
+inline void
+FlipGeodesic::add_wedge(const gpf::HalfedgeId h1, const gpf::HalfedgeId h2)
+{
     auto ha = mesh->halfedge(h1);
     auto hb = mesh->halfedge(h2);
     auto vb = ha.to();
@@ -604,32 +674,32 @@ inline void FlipGeodesic::add_wedge(const gpf::HalfedgeId h1, const gpf::Halfedg
     auto vc = hb.to().id;
     constexpr double EPS_ANGLE = 1e-5;
     if (left_angle < std::numbers::pi - EPS_ANGLE) {
-        pq.push(Wedge{.angle = left_angle, .vertices{va, vb.id, vc}, .hid = h1, .dir = TurnDirection::Left});
+        pq.push(Wedge{ .angle = left_angle, .vertices{ va, vb.id, vc }, .hid = h1, .dir = TurnDirection::Left });
     }
     if (right_angle < std::numbers::pi - EPS_ANGLE) {
-        pq.push(Wedge{.angle = right_angle, .vertices{va, vb.id, vc}, .hid = h1, .dir = TurnDirection::Right});
+        pq.push(Wedge{ .angle = right_angle, .vertices{ va, vb.id, vc }, .hid = h1, .dir = TurnDirection::Right });
     }
 }
 
-inline void FlipGeodesic::shorten_locally() {
+inline void
+FlipGeodesic::shorten_locally()
+{
     auto [angle, vertices, path_prev_hid, dir] = pq.top();
     auto path_next_hid = mesh->halfedge_prop(path_prev_hid).path_next;
     pq.pop();
-    if (
-        !path_next_hid.valid() ||
-        mesh->he_from(path_prev_hid) != vertices[0] ||
-        mesh->he_to(path_prev_hid) != vertices[1] ||
-        mesh->he_to(path_next_hid) != vertices[2]
-    ) {
+    if (!path_next_hid.valid() || mesh->he_from(path_prev_hid) != vertices[0] ||
+        mesh->he_to(path_prev_hid) != vertices[1] || mesh->he_to(path_next_hid) != vertices[2]) {
         return;
     }
 
     const auto path_prev_prev_hid = mesh->halfedge_prop(path_prev_hid).path_prev;
     const auto path_next_next_hid = mesh->halfedge_prop(path_next_hid).path_next;
 
-    auto [prev_hid, next_hid] = dir == TurnDirection::Left ? std::pair{path_prev_hid, path_next_hid} : std::pair{mesh->he_twin(path_next_hid), mesh->he_twin(path_prev_hid)};
+    auto [prev_hid, next_hid] = dir == TurnDirection::Left
+                                  ? std::pair{ path_prev_hid, path_next_hid }
+                                  : std::pair{ mesh->he_twin(path_next_hid), mesh->he_twin(path_prev_hid) };
     auto curr_he = mesh->halfedge(prev_hid).next();
-    while(curr_he.id != next_hid) {
+    while (curr_he.id != next_hid) {
         if (curr_he.twin().id == prev_hid) {
             curr_he = curr_he.twin().next();
             continue;
@@ -661,7 +731,9 @@ inline void FlipGeodesic::shorten_locally() {
     replace_path(std::move(new_path), path_prev_prev_hid, path_next_next_hid);
 }
 
-inline bool FlipGeodesic::flip(const gpf::HalfedgeId hid) const {
+inline bool
+FlipGeodesic::flip(const gpf::HalfedgeId hid) const
+{
     if (mesh->halfedge(hid).edge().prop().locked) {
         return false;
     }
@@ -679,7 +751,7 @@ inline bool FlipGeodesic::flip(const gpf::HalfedgeId hid) const {
     auto lda = mesh->halfedge(hda).edge().prop().len;
     auto lca = mesh->halfedge(hca).edge().prop().len;
 
-    Eigen::Vector2d pa {lca, 0.0};
+    Eigen::Vector2d pa{ lca, 0.0 };
     auto pb = triangle_oppo_point(lca, lab, lbc, false);
     auto pd = triangle_oppo_point(lca, lcd, lda, true);
 
@@ -687,7 +759,7 @@ inline bool FlipGeodesic::flip(const gpf::HalfedgeId hid) const {
     auto right_area = (pb - pa).cross(pd - pa);
     constexpr double TRIANGLE_TEST_EPS = 1e-6;
     auto area_sum = left_area + right_area;
-    if(left_area / area_sum < TRIANGLE_TEST_EPS || right_area / area_sum < TRIANGLE_TEST_EPS) {
+    if (left_area / area_sum < TRIANGLE_TEST_EPS || right_area / area_sum < TRIANGLE_TEST_EPS) {
         return false;
     }
 
@@ -705,21 +777,39 @@ inline bool FlipGeodesic::flip(const gpf::HalfedgeId hid) const {
     gpf::update_corner_angles_on_face(he_db.face());
 
     // edge bd counld't be boundary
-    he_bd.prop().signpost_angle = std::fmod(he_bc.prop().signpost_angle + he_bc.prop().angle, he_ab.to().prop().angle_sum);
+    he_bd.prop().signpost_angle =
+      std::fmod(he_bc.prop().signpost_angle + he_bc.prop().angle, he_ab.to().prop().angle_sum);
     gpf::update_halfedge_vector(he_bd);
-    he_db.prop().signpost_angle = std::fmod(he_da.prop().signpost_angle + he_da.prop().angle, he_cd.to().prop().angle_sum);
+    he_db.prop().signpost_angle =
+      std::fmod(he_da.prop().signpost_angle + he_da.prop().angle, he_cd.to().prop().angle_sum);
     gpf::update_halfedge_vector(he_db);
 
     // auto _a1 = std::fmod(he_ab.twin().prop().signpost_angle - he_bd.prop().angle, he_bd.from().prop().angle_sum);
     // auto _a2 = he_bd.prop().signpost_angle - _a1;
-    assert(std::abs(he_db.prop().signpost_angle - std::fmod(he_cd.twin().prop().signpost_angle - he_db.prop().angle + he_db.from().prop().angle_sum, he_db.from().prop().angle_sum)) < 1e-8);
-    assert(std::abs(he_bd.prop().signpost_angle - std::fmod(he_ab.twin().prop().signpost_angle - he_bd.prop().angle + he_bd.from().prop().angle_sum, he_bd.from().prop().angle_sum)) < 1e-8);
-    assert(std::abs(ranges::fold_left( he_bd.from().outgoing_halfedges() | views::transform([](auto he) { return he.prop().angle; }), 0.0, std::plus{}) - he_bd.from().prop().angle_sum) < 1e-8);
-    assert(std::abs(ranges::fold_left( he_db.from().outgoing_halfedges() | views::transform([](auto he) { return he.prop().angle; }), 0.0, std::plus{}) - he_db.from().prop().angle_sum) < 1e-8);
+    assert(std::abs(he_db.prop().signpost_angle -
+                    std::fmod(he_cd.twin().prop().signpost_angle - he_db.prop().angle + he_db.from().prop().angle_sum,
+                              he_db.from().prop().angle_sum)) < 1e-8);
+    assert(std::abs(he_bd.prop().signpost_angle -
+                    std::fmod(he_ab.twin().prop().signpost_angle - he_bd.prop().angle + he_bd.from().prop().angle_sum,
+                              he_bd.from().prop().angle_sum)) < 1e-8);
+    assert(std::abs(ranges::fold_left(he_bd.from().outgoing_halfedges() |
+                                        views::transform([](auto he) { return he.prop().angle; }),
+                                      0.0,
+                                      std::plus{}) -
+                    he_bd.from().prop().angle_sum) < 1e-8);
+    assert(std::abs(ranges::fold_left(he_db.from().outgoing_halfedges() |
+                                        views::transform([](auto he) { return he.prop().angle; }),
+                                      0.0,
+                                      std::plus{}) -
+                    he_db.from().prop().angle_sum) < 1e-8);
     return true;
 }
 
-inline void FlipGeodesic::replace_path(std::vector<gpf::HalfedgeId>&& new_path, const gpf::HalfedgeId path_prev_prev_hid, const gpf::HalfedgeId path_next_next_hid) {
+inline void
+FlipGeodesic::replace_path(std::vector<gpf::HalfedgeId>&& new_path,
+                           const gpf::HalfedgeId path_prev_prev_hid,
+                           const gpf::HalfedgeId path_next_next_hid)
+{
     auto prev_he = mesh->halfedge(path_prev_prev_hid);
     auto curr_he = mesh->halfedge(new_path.front());
     curr_he.prop().path_prev = prev_he.id;
@@ -745,8 +835,10 @@ inline void FlipGeodesic::replace_path(std::vector<gpf::HalfedgeId>&& new_path, 
 }
 
 template<std::size_t N, typename Mesh>
-struct TracePolyline {
-    struct EdgePoint {
+struct TracePolyline
+{
+    struct EdgePoint
+    {
         gpf::EdgeId eid;
         double t;
         std::array<double, N> pt;
@@ -767,7 +859,9 @@ struct TracePolyline {
 };
 
 template<std::size_t N, typename Mesh>
-void TracePolyline<N, Mesh>::trace_from_vertex(gpf::HalfedgeId start_hid) {
+void
+TracePolyline<N, Mesh>::trace_from_vertex(gpf::HalfedgeId start_hid)
+{
     auto start_vid = aux_mesh->he_from(start_hid);
     assert(std::get<gpf::VertexId>(path.back()) == start_vid);
     auto end_vid = aux_mesh->he_to(start_hid);
@@ -787,7 +881,7 @@ void TracePolyline<N, Mesh>::trace_from_vertex(gpf::HalfedgeId start_hid) {
         auto pa = prev_he.to().prop().pt;
         const auto& pd = mesh->vertex(end_vid).prop().pt;
         auto right_ori = predicates::orient2d(pc.data(), pa.data(), pd.data());
-        while(true) {
+        while (true) {
             auto curr_he = prev_he.prev().twin();
 
             const auto& pb = curr_he.to().prop().pt;
@@ -814,8 +908,8 @@ void TracePolyline<N, Mesh>::trace_from_vertex(gpf::HalfedgeId start_hid) {
             auto lbc = origin_edge_lengths[mesh->he_edge(hcb).idx];
             auto lca = origin_edge_lengths[mesh->he_edge(hca).idx];
 
-            Vector2d pa{lab, 0.0};
-            constexpr std::array<double, 2> pb{{0.0, 0.0}};
+            Vector2d pa{ lab, 0.0 };
+            constexpr std::array<double, 2> pb{ { 0.0, 0.0 } };
             Vector2d pc = triangle_oppo_point(lab, lbc, lca, true);
             std::array<double, 2> dir_arr;
             auto dir = Vector2d::Map(dir_arr.data());
@@ -858,10 +952,12 @@ void TracePolyline<N, Mesh>::trace_from_vertex(gpf::HalfedgeId start_hid) {
 }
 
 template<std::size_t N, typename Mesh>
-void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* dir_data, const gpf::VertexId end_vid) {
+void
+TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* dir_data, const gpf::VertexId end_vid)
+{
     using Vec = Eigen::Matrix<double, N, 1>;
     Eigen::Vector2d dir = Eigen::Vector2d::Map(dir_data);
-    while(true) {
+    while (true) {
         auto he_ab = mesh->halfedge(hab);
         auto he_bc = he_ab.next();
         if (he_bc.to().id == end_vid) {
@@ -869,7 +965,8 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
             path_on_face_vec.emplace_back(he_bc.face().id);
             return;
         }
-        auto trace_next = [this, &dir, &hab, &he_bc](const auto& mid_pt, const auto& pa, const auto& pb, const auto& pc, const auto& pd) {
+        auto trace_next = [this, &dir, &hab, &he_bc](
+                            const auto& mid_pt, const auto& pa, const auto& pb, const auto& pc, const auto& pd) {
             auto vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc.data());
             if (vc_ori > 0.0) {
                 auto right_ori = predicates::orient2d(mid_pt.data(), pb.data(), pd.data());
@@ -905,8 +1002,8 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
             auto lbc = origin_edge_lengths[he_bc.edge().id.idx];
             auto lca = origin_edge_lengths[he_ca.edge().id.idx];
 
-            Vector2d pa{0.0, 0.0};
-            Vector2d pb{lab, 0.0};
+            Vector2d pa{ 0.0, 0.0 };
+            Vector2d pb{ lab, 0.0 };
             Vector2d pc = triangle_oppo_point(lab, lbc, lca, false);
             double t = edge_points.back().t;
             if (he_ab.edge().halfedge().id != he_ab.id) {
@@ -920,7 +1017,9 @@ void TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* 
 }
 
 template<std::size_t N, typename Mesh>
-void TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double right_ori, gpf::HalfedgeId hab) {
+void
+TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double right_ori, gpf::HalfedgeId hab)
+{
     using Vec = Eigen::Matrix<double, N, 1>;
     auto s = left_ori + right_ori;
     auto tb = left_ori / s;
@@ -946,19 +1045,22 @@ void TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double righ
 }
 
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
-auto project_polylines_on_mesh(
-    std::vector<std::array<double, 3>>& points,
-    const std::vector<std::vector<std::size_t>>& polylines,
-    gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
-    std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
-    std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr
-) {
+auto
+project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
+                          const std::vector<std::vector<std::size_t>>& polylines,
+                          gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
+                          std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
+                          std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr)
+{
     using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
 
     constexpr double EPS = 1e-3;
-    auto point_vertices = detail::project_points_on_mesh(points, mesh, EPS, face_parent_map, edge_parent_map);
+    auto point_vertices = detail::project_points_on_mesh<N>(points, mesh, EPS, face_parent_map, edge_parent_map);
+    mesh.update_vertex_halfedges();
+
     detail::AuxiliaryMesh aux_mesh;
     aux_mesh.copy_from(mesh);
+
     gpf::update_edge_lengths<N>(aux_mesh, [&mesh](auto v) {
         return std::span<const double, N>{mesh.vertex_prop(v.id).pt};
     });
@@ -976,19 +1078,17 @@ auto project_polylines_on_mesh(
         origin_edge_lengths[edge.id.idx] = edge.prop().len;
     }
 
-    detail::FlipGeodesic flip_geodesic{.mesh = &aux_mesh};
+    detail::FlipGeodesic flip_geodesic{ .mesh = &aux_mesh };
     std::vector<typename detail::TracePolyline<N, Mesh>::EdgePoint> edge_points;
     std::vector<std::vector<typename detail::TracePolyline<N, Mesh>::Anchor>> polyline_paths;
     std::vector<std::vector<gpf::FaceId>> path_segment_faces;
     polyline_paths.reserve(polylines.size());
     for (const auto polyline : polylines) {
-        detail::TracePolyline<N, Mesh> trace {
-            .origin_signpost_angles{origin_signpost_angles},
-            .origin_edge_lengths{origin_edge_lengths},
-            .edge_points{edge_points},
-            .mesh{&mesh},
-            .aux_mesh{&aux_mesh}
-        };
+        detail::TracePolyline<N, Mesh> trace{ .origin_signpost_angles{ origin_signpost_angles },
+                                              .origin_edge_lengths{ origin_edge_lengths },
+                                              .edge_points{ edge_points },
+                                              .mesh{ &mesh },
+                                              .aux_mesh{ &aux_mesh } };
 
         trace.path.push_back(point_vertices[polyline.front()]);
         for (std::size_t i = 0; i + 1 < polyline.size(); i++) {
@@ -997,10 +1097,8 @@ auto project_polylines_on_mesh(
             if (va == vb) {
                 continue;
             }
-            auto local_path =
-                flip_geodesic.perform(detail::shortest_patch_by_dijksta(aux_mesh, va, vb,
-                    [](auto e) { return e.prop().locked; },
-                    [](auto e) { return e.prop().len; }));
+            auto local_path = flip_geodesic.perform(detail::shortest_patch_by_dijksta(
+              aux_mesh, va, vb, [](auto e) { return e.prop().locked; }, [](auto e) { return e.prop().len; }));
             for (const auto hid : std::move(local_path)) {
                 trace.trace_from_vertex(hid);
             }
@@ -1022,7 +1120,9 @@ auto project_polylines_on_mesh(
         }
     }
 
-    std::unordered_map<gpf::FaceId, std::pair<detail::CCS3d, std::vector<typename detail::TracePolyline<N, Mesh>::Anchor>>> face_to_ccs_map;
+    std::unordered_map<gpf::FaceId,
+                       std::pair<detail::FaceCoords<N>, std::vector<typename detail::TracePolyline<N, Mesh>::Anchor>>>
+      face_to_ccs_map;
     for (const auto& [path, faces] : std::views::zip(polyline_paths, path_segment_faces)) {
         for (std::size_t i = 0; i < faces.size(); i++) {
             const auto fid = faces[i];
@@ -1036,61 +1136,80 @@ auto project_polylines_on_mesh(
                 iter->second.second.push_back(va);
                 iter->second.second.push_back(vb);
             } else {
-                face_to_ccs_map.emplace(fid, std::make_pair(detail::CCS3d(mesh, fid), std::vector<typename detail::TracePolyline<N, Mesh>::Anchor>{va, vb}));
+                face_to_ccs_map.emplace(
+                  fid,
+                  std::make_pair(detail::make_face_coords<N>(mesh, fid),
+                                 std::vector<typename detail::TracePolyline<N, Mesh>::Anchor>{ va, vb }));
             }
         }
     }
 
     for (const auto& [eid, point_indices] : edge_to_points_map) {
-        detail::split_edge_by_points(mesh, eid, [&edge_points](std::size_t pid) {
-            return edge_points[pid].pt;
-        }, point_indices, edge_point_vertices, EPS, edge_parent_map);
+        detail::split_edge_by_points<N>(
+          mesh,
+          eid,
+          [&edge_points](std::size_t pid) { return edge_points[pid].pt; },
+          point_indices,
+          edge_point_vertices,
+          EPS,
+          edge_parent_map);
     }
 
     auto get_vertex_id = [&edge_point_vertices](auto anchor) {
-        return std::visit([&edge_point_vertices](auto&& arg) -> gpf::VertexId {
-            using T = std::decay_t<decltype(arg)>;
-            if constexpr (std::is_same_v<T, gpf::VertexId>) {
-                return arg;
-            } else {
-                return edge_point_vertices[arg];
-            }
-        }, anchor);
+        return std::visit(
+          [&edge_point_vertices](auto&& arg) -> gpf::VertexId {
+              using T = std::decay_t<decltype(arg)>;
+              if constexpr (std::is_same_v<T, gpf::VertexId>) {
+                  return arg;
+              } else {
+                  return edge_point_vertices[arg];
+              }
+          },
+          anchor);
     };
 
     for (const auto& [fid, ccs_and_segments] : face_to_ccs_map) {
         const auto& ccs = ccs_and_segments.first;
         const auto& segments = ccs_and_segments.second;
         auto segment_vertices = segments | std::views::transform(get_vertex_id) | std::ranges::to<std::vector>();
-        detail::triangulate_on_face(mesh, fid, {}, ccs, {}, segment_vertices, edge_point_vertices, face_parent_map);
+        detail::triangulate_on_face<N>(mesh,
+                                       fid,
+                                       std::span<const std::array<double, N>>{},
+                                       ccs,
+                                       {},
+                                       segment_vertices,
+                                       edge_point_vertices,
+                                       face_parent_map);
     }
 
     return std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
-        std::vector<gpf::HalfedgeId> halfedges;
-        halfedges.reserve(path.size() - 1);
-        for (std::size_t i = 0; i + 1 < path.size(); ++i) {
-            const auto va = get_vertex_id(path[i]);
-            const auto vb = get_vertex_id(path[i + 1]);
-            if (va == vb) {
-                continue;
-            }
-            auto hid = mesh.he_from_vertices(va, vb);
-            if (hid.valid()) {
-                halfedges.emplace_back(hid);
-            } else {
-                halfedges.append_range(detail::shortest_patch_by_dijksta(
-                    mesh, va, vb,
-                    [] (auto e) { return false; },
-                    [] (auto e) {
-                        auto [v1, v2] = e.vertices();
-                        std::span<const double, N> p1{v1.prop().pt};
-                        std::span<const double, N> p2{v2.prop().pt};
-                        return std::sqrt(gpf::squared_distance(p1, p2));
-                    }
-                ));
-            }
-        }
-        return halfedges;
-    }) | std::ranges::to<std::vector>();
+               std::vector<gpf::HalfedgeId> halfedges;
+               halfedges.reserve(path.size() - 1);
+               for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+                   const auto va = get_vertex_id(path[i]);
+                   const auto vb = get_vertex_id(path[i + 1]);
+                   if (va == vb) {
+                       continue;
+                   }
+                   auto hid = mesh.he_from_vertices(va, vb);
+                   if (hid.valid()) {
+                       halfedges.emplace_back(hid);
+                   } else {
+                       halfedges.append_range(detail::shortest_patch_by_dijksta(
+                         mesh,
+                         va,
+                         vb,
+                         [](auto e) { return false; },
+                         [](auto e) {
+                             auto [v1, v2] = e.vertices();
+                             const auto p1 = std::span<const double, N>(v1.prop().pt);
+                             const auto p2 = std::span<const double, N>(v2.prop().pt);
+                             return std::sqrt(gpf::squared_distance(p1, p2));
+                         }));
+                   }
+               }
+               return halfedges;
+           }) |
+           std::ranges::to<std::vector>();
 }
 } // namespace gpf

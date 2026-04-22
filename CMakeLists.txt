@@ -55,6 +55,7 @@ if(GPF_ALGORITHM_BUILD_TESTS)
     tests/test_mesh_property.cpp
     tests/test_mesh_edge_collapse.cpp
     tests/test_orthtree.cpp
+    tests/test_project_polylines_on_mesh.cpp
   )
   target_link_libraries(gpf_algorithm_tests PRIVATE gpf::algorithm)
   add_test(NAME gpf_algorithm_tests COMMAND gpf_algorithm_tests)

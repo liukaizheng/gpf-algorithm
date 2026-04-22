@@ -21,42 +21,41 @@ write_obj(const std::string& name, const std::vector<double>& points, const std:
 }
 
 void
-test_triangulate_bug2() {
-    std::vector<double> points {
-        0.0,
-        0.0,
-        0.14763533445827418,
-        9.1838131789240771E-16,
-        0.28476798756884003,
-        6.9193097214003481E-15,
-        1.2257306612987737,
-        -4.2993281473632734E-17,
-        0.22469289424128275,
-        0.068038519204616399
-    };
+test_triangulate_bug2()
+{
+    std::vector<double> points{ 0.0,
+                                0.0,
+                                0.14763533445827418,
+                                9.1838131789240771E-16,
+                                0.28476798756884003,
+                                6.9193097214003481E-15,
+                                1.2257306612987737,
+                                -4.2993281473632734E-17,
+                                0.22469289424128275,
+                                0.068038519204616399 };
     auto triangles = gpf::triangulate_points(points, true);
     assert(triangles.size() == 15);
 }
 
 void
-test_triangulate_bug1() {
-    std::vector<double> points {
-        0.43336197097855234,
-        0.43336197097855234,
-        0.32502147823393557,
-        0.32502147823393557,
-        0.0,
-        0.0,
-        0.65004295646789778,
-        0.0,
-        1.0395797536276792,
-        0.0,
-        1.0395797536276792,
-        0.43336197097858076,
-        1.0395797536276792,
-        1.0395797536276916
-    };
-    auto triangles = gpf::triangulate_polygon(points, std::vector<std::size_t>{0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 0}, 6);
+test_triangulate_bug1()
+{
+    std::vector<double> points{ 0.43336197097855234,
+                                0.43336197097855234,
+                                0.32502147823393557,
+                                0.32502147823393557,
+                                0.0,
+                                0.0,
+                                0.65004295646789778,
+                                0.0,
+                                1.0395797536276792,
+                                0.0,
+                                1.0395797536276792,
+                                0.43336197097858076,
+                                1.0395797536276792,
+                                1.0395797536276916 };
+    auto triangles =
+      gpf::triangulate_polygon(points, std::vector<std::size_t>{ 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 0 }, 6);
     assert(triangles.size() == 15);
 }
 
@@ -171,7 +170,9 @@ test_alternate_axes()
     }
 }
 
-void test_cdt_with_intersections() {
+void
+test_cdt_with_intersections()
+{
     const int N = 60;
     std::vector<double> points;
     points.reserve(N * 2);

@@ -1,14 +1,19 @@
+#include <algorithm>
 #include <queue>
 #include <unordered_set>
-#include <algorithm>
 
 #include <gpf/mesh.hpp>
 #include <gpf/mesh_property.hpp>
 
 namespace gpf {
-template <typename Mesh>
-void collapse_short_edges(Mesh& mesh, const double tol) {
-    std::priority_queue<std::pair<double, EdgeId>, std::vector<std::pair<double, EdgeId>>, std::greater<std::pair<double, EdgeId>>> queue;
+template<typename Mesh>
+void
+collapse_short_edges(Mesh& mesh, const double tol)
+{
+    std::priority_queue<std::pair<double, EdgeId>,
+                        std::vector<std::pair<double, EdgeId>>,
+                        std::greater<std::pair<double, EdgeId>>>
+      queue;
     for (auto edge : mesh.edges()) {
         if (edge.prop().len < tol) {
             queue.emplace(edge.prop().len, edge.id);
@@ -35,18 +40,18 @@ void collapse_short_edges(Mesh& mesh, const double tol) {
         }
 
         if (std::ranges::any_of(mesh.vertex(va).edges(), [&mesh, &vb_oppo_vertices, va, eid](auto e) {
-            auto [v1, v2] = mesh.e_vertices(e.id);
-            const VertexId va_oppo = v1 == va ? v2 : v1;
-            if (vb_oppo_vertices.contains(va_oppo)) {
-                for (const auto he : mesh.edge(eid).halfedges()) {
-                    if (he.next().to().id == va_oppo) {
-                        return false;
+                auto [v1, v2] = mesh.e_vertices(e.id);
+                const VertexId va_oppo = v1 == va ? v2 : v1;
+                if (vb_oppo_vertices.contains(va_oppo)) {
+                    for (const auto he : mesh.edge(eid).halfedges()) {
+                        if (he.next().to().id == va_oppo) {
+                            return false;
+                        }
                     }
+                    return true;
                 }
-                return true;
-            }
-            return false;
-        })) {
+                return false;
+            })) {
             continue;
         }
 

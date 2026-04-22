@@ -18,6 +18,8 @@ test_cdt_with_intersections();
 void
 test_property_edge_length_updates();
 void
+test_project_polylines_on_mesh_2d_points();
+void
 test_mesh_edge_collapse1();
 void
 test_orthtree_quadtree();
@@ -29,6 +31,7 @@ test_orthtree_traversal();
 int
 main()
 {
+    test_project_polylines_on_mesh_2d_points();
     test_mesh_edge_collapse1();
     test_triangulate_bug2();
     test_triangulate_bug1();

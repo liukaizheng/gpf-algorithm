@@ -8,7 +8,8 @@
 #include <string>
 #include <vector>
 
-struct OffData {
+struct OffData
+{
     std::vector<std::array<double, 3>> vertices;
     std::vector<std::vector<std::size_t>> faces;
 };
@@ -69,7 +70,7 @@ read_off(const std::string& filename)
         if (!(iss >> x >> y >> z)) {
             throw std::runtime_error("Invalid OFF file: cannot read vertex " + std::to_string(i));
         }
-        data.vertices.push_back({x, y, z});
+        data.vertices.push_back({ x, y, z });
     }
 
     // Read faces
@@ -88,10 +89,8 @@ read_off(const std::string& filename)
         std::vector<std::size_t> face(n_verts);
         for (std::size_t j = 0; j < n_verts; ++j) {
             if (!(iss >> face[j])) {
-                throw std::runtime_error(
-                    "Invalid OFF file: cannot read vertex index " + std::to_string(j) + " of face " +
-                    std::to_string(i)
-                );
+                throw std::runtime_error("Invalid OFF file: cannot read vertex index " + std::to_string(j) +
+                                         " of face " + std::to_string(i));
             }
         }
         data.faces.push_back(std::move(face));
