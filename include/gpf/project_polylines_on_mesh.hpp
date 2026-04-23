@@ -1061,9 +1061,8 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
     detail::AuxiliaryMesh aux_mesh;
     aux_mesh.copy_from(mesh);
 
-    gpf::update_edge_lengths<N>(aux_mesh, [&mesh](auto v) {
-        return std::span<const double, N>{mesh.vertex_prop(v.id).pt};
-    });
+    gpf::update_edge_lengths<N>(aux_mesh,
+                                [&mesh](auto v) { return std::span<const double, N>{ mesh.vertex_prop(v.id).pt }; });
     gpf::update_corner_angles(aux_mesh);
     gpf::update_vertex_angle_sums(aux_mesh);
     gpf::update_halfedge_signpost_angles(aux_mesh);
@@ -1182,34 +1181,35 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
                                        face_parent_map);
     }
 
-    return std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
-               std::vector<gpf::HalfedgeId> halfedges;
-               halfedges.reserve(path.size() - 1);
-               for (std::size_t i = 0; i + 1 < path.size(); ++i) {
-                   const auto va = get_vertex_id(path[i]);
-                   const auto vb = get_vertex_id(path[i + 1]);
-                   if (va == vb) {
-                       continue;
-                   }
-                   auto hid = mesh.he_from_vertices(va, vb);
-                   if (hid.valid()) {
-                       halfedges.emplace_back(hid);
-                   } else {
-                       halfedges.append_range(detail::shortest_patch_by_dijksta(
-                         mesh,
-                         va,
-                         vb,
-                         [](auto e) { return false; },
-                         [](auto e) {
-                             auto [v1, v2] = e.vertices();
-                             const auto p1 = std::span<const double, N>(v1.prop().pt);
-                             const auto p2 = std::span<const double, N>(v2.prop().pt);
-                             return std::sqrt(gpf::squared_distance(p1, p2));
-                         }));
-                   }
-               }
-               return halfedges;
-           }) |
-           std::ranges::to<std::vector>();
+    return std::make_pair(std::move(point_vertices),
+                          std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
+                              std::vector<gpf::HalfedgeId> halfedges;
+                              halfedges.reserve(path.size() - 1);
+                              for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+                                  const auto va = get_vertex_id(path[i]);
+                                  const auto vb = get_vertex_id(path[i + 1]);
+                                  if (va == vb) {
+                                      continue;
+                                  }
+                                  auto hid = mesh.he_from_vertices(va, vb);
+                                  if (hid.valid()) {
+                                      halfedges.emplace_back(hid);
+                                  } else {
+                                      halfedges.append_range(detail::shortest_patch_by_dijksta(
+                                        mesh,
+                                        va,
+                                        vb,
+                                        [](auto e) { return false; },
+                                        [](auto e) {
+                                            auto [v1, v2] = e.vertices();
+                                            const auto p1 = std::span<const double, N>(v1.prop().pt);
+                                            const auto p2 = std::span<const double, N>(v2.prop().pt);
+                                            return std::sqrt(gpf::squared_distance(p1, p2));
+                                        }));
+                                  }
+                              }
+                              return halfedges;
+                          }) |
+                            std::ranges::to<std::vector>());
 }
 } // namespace gpf
