@@ -672,7 +672,7 @@ FlipGeodesic::add_wedge(const gpf::HalfedgeId h1, const gpf::HalfedgeId h2)
 
     auto va = ha.from().id;
     auto vc = hb.to().id;
-    constexpr double EPS_ANGLE = 1e-5;
+    constexpr double EPS_ANGLE = 1e-3;
     if (left_angle < std::numbers::pi - EPS_ANGLE) {
         pq.push(Wedge{ .angle = left_angle, .vertices{ va, vb.id, vc }, .hid = h1, .dir = TurnDirection::Left });
     }
