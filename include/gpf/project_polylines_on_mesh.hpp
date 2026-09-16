@@ -281,13 +281,13 @@ split_edge_by_points(Mesh& mesh,
         const auto pa_ref = VectorNd<N>::Map(pa.data());
         const auto pb_ref = VectorNd<N>::Map(pb.data());
         auto vab = (pb_ref - pa_ref).eval();
-        auto sq_edge_len = vab.squaredNorm();
+        const auto edge_length = vab.norm();
         std::vector<std::size_t> indices(edge_point_indices.size());
         std::iota(indices.begin(), indices.end(), 0);
         const auto distances = edge_point_indices |
-                               std::views::transform([pa_ref, sq_edge_len, &vab, &get_point](const auto pid) {
+                               std::views::transform([pa_ref, edge_length, &vab, &get_point](const auto pid) {
                                    auto pt = get_point(pid);
-                                   return std::max((VectorNd<N>::Map(pt.data()) - pa_ref).dot(vab), 0.0) / sq_edge_len;
+                                   return std::max((VectorNd<N>::Map(pt.data()) - pa_ref).dot(vab), 0.0) / edge_length;
                                }) |
                                std::ranges::to<std::vector>();
 
@@ -1463,12 +1463,15 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
 
     std::unordered_map<gpf::EdgeId, std::vector<std::size_t>> edge_to_points_map;
     std::vector<gpf::VertexId> edge_point_vertices(edge_points.size(), gpf::VertexId{});
+    const double sq_eps = eps * eps;
     for (std::size_t pid = 0; pid < edge_points.size(); pid++) {
         const auto& point = edge_points[pid];
-        if (point.t < eps) {
-            edge_point_vertices[pid] = mesh.edge(point.eid).halfedge().from().id;
-        } else if (point.t > 1.0 - eps) {
-            edge_point_vertices[pid] = mesh.edge(point.eid).halfedge().to().id;
+        const auto he = mesh.edge(point.eid).halfedge();
+        const auto pt = detail::VectorNd<N>::Map(point.pt.data());
+        if ((pt - detail::VectorNd<N>::Map(he.from().prop().pt.data())).squaredNorm() < sq_eps) {
+            edge_point_vertices[pid] = he.from().id;
+        } else if ((pt - detail::VectorNd<N>::Map(he.to().prop().pt.data())).squaredNorm() < sq_eps) {
+            edge_point_vertices[pid] = he.to().id;
         } else {
             edge_to_points_map[point.eid].push_back(pid);
         }
