@@ -25,8 +25,6 @@ namespace gpf {
 
 enum class ExpMapFailure
 {
-    EmptyPatch,         // No triangular faces qualify.
-    MissingCenter,      // No retained face is incident to the projected center.
     DisconnectedPatch,  // Retained faces are not connected through edges.
     NonManifoldVertex,  // A used vertex has separated retained face fans.
     NotTopologicalDisk, // The connected, vertex-manifold patch has Euler characteristic other than one.
@@ -36,6 +34,9 @@ enum class ExpMapFailure
 /// A nonempty, connected triangular topological disk in the post-projection source mesh.
 /// face_ids are unique and in traversal order. vertex_ids are exactly their incident vertices, in ascending ID order,
 /// with vertex_ids[i] corresponding to raw uvs[i]. The center is included at UV (0, 0).
+/// boundary_vertex_ids is the single boundary loop of face_ids, following retained-face halfedge orientation and
+/// starting at the smallest boundary vertex ID. Each vertex is listed once; the last connects back to the first.
+/// Its entries are post-projection mesh IDs from vertex_ids, not indices into uvs. No UV winding is guaranteed.
 /// Later mesh edits can invalidate these IDs; a topological disk does not guarantee an injective or unflipped UV map.
 struct ExpMapResult
 {
@@ -43,6 +44,7 @@ struct ExpMapResult
     std::vector<gpf::VertexId> vertex_ids;
     std::vector<std::array<double, 2>> uvs;
     std::vector<gpf::FaceId> face_ids;
+    std::vector<gpf::VertexId> boundary_vertex_ids;
 };
 
 namespace detail {
@@ -50,6 +52,7 @@ namespace detail {
 struct ExpMapPatch
 {
     std::vector<gpf::FaceId> face_ids;
+    std::vector<gpf::VertexId> boundary_vertex_ids;
     std::size_t n_vertices = 0;
 };
 
@@ -64,36 +67,27 @@ validate_exp_map_patch(const Mesh& mesh,
 {
     assert(kept_faces.size() == mesh.n_faces_capacity());
     assert(used_vertices.size() == mesh.n_vertices_capacity());
-    std::size_t n_faces = 0;
-    FaceId start_face{};
-    for (const auto face : mesh.faces()) {
-        if (!kept_faces[face.id.idx]) {
-            continue;
-        }
-        ++n_faces;
-        if (!start_face.valid()) {
-            for (const auto he : face.halfedges()) {
-                if (he.from().id == center_vertex) {
-                    start_face = face.id;
-                    break;
-                }
-            }
-        }
-    }
-    if (n_faces == 0) {
-        return std::unexpected(ExpMapFailure::EmptyPatch);
-    }
-    if (!start_face.valid()) {
-        return std::unexpected(ExpMapFailure::MissingCenter);
-    }
+    const auto n_faces = static_cast<std::size_t>(std::ranges::count(kept_faces, true));
+
+    const auto start_face = (*std::ranges::find_if(mesh.vertex(center_vertex).incoming_halfedges(),
+                                                   [&kept_faces](const auto he) noexcept {
+                                                       const auto fid = he.face().id;
+                                                       return fid.valid() && kept_faces[fid.idx];
+                                                   }))
+                              .face()
+                              .id;
 
     std::vector<bool> visited_faces(mesh.n_faces_capacity(), false);
+    std::vector<bool> boundary_vertices(mesh.n_vertices_capacity(), false);
     std::fill(used_vertices.begin(), used_vertices.end(), false);
     ExpMapPatch patch;
     patch.face_ids.reserve(n_faces);
     patch.face_ids.push_back(start_face);
     visited_faces[start_face.idx] = true;
     std::size_t n_edges = 0;
+    std::size_t n_boundary_edges = 0;
+    HalfedgeId start_boundary_halfedge{};
+    bool has_nonmanifold_vertex = false;
     // The returned face list is also the FIFO; marking on enqueue keeps every face unique.
     for (std::size_t cursor = 0; cursor < patch.face_ids.size(); ++cursor) {
         const auto face_id = patch.face_ids[cursor];
@@ -104,40 +98,35 @@ validate_exp_map_patch(const Mesh& mesh,
                 ++patch.n_vertices;
             }
             const auto neighbor_id = he.twin().face().id;
-            if (!kept_faces[neighbor_id.idx] || face_id < neighbor_id) {
+            if (!kept_faces[neighbor_id.idx]) {
+                ++n_edges;
+                ++n_boundary_edges;
+                if (!start_boundary_halfedge.valid() || vertex_id < mesh.halfedge(start_boundary_halfedge).from().id) {
+                    start_boundary_halfedge = he.id;
+                }
+                // In a closed manifold, each boundary fan has one outgoing boundary halfedge at its vertex.
+                if (boundary_vertices[vertex_id.idx]) {
+                    has_nonmanifold_vertex = true;
+                }
+                boundary_vertices[vertex_id.idx] = true;
+                continue;
+            }
+            if (face_id < neighbor_id) {
                 ++n_edges;
             }
-            if (kept_faces[neighbor_id.idx] && !visited_faces[neighbor_id.idx]) {
+            if (!visited_faces[neighbor_id.idx]) {
                 visited_faces[neighbor_id.idx] = true;
                 patch.face_ids.push_back(neighbor_id);
             }
         }
     }
-    if (patch.face_ids.size() != n_faces) {
-        return std::unexpected(ExpMapFailure::DisconnectedPatch);
+
+    if (has_nonmanifold_vertex) {
+        return std::unexpected(ExpMapFailure::NonManifoldVertex);
     }
 
-    for (const auto vertex : mesh.vertices()) {
-        if (!used_vertices[vertex.id.idx]) {
-            continue;
-        }
-        const auto start = vertex.halfedge();
-        auto he = start;
-        bool previous_kept = kept_faces[he.face().id.idx];
-        std::size_t retained_runs = 0;
-        do {
-            he = he.twin().next();
-            const bool current_kept = kept_faces[he.face().id.idx];
-            if (current_kept && !previous_kept) {
-                ++retained_runs;
-            }
-            previous_kept = current_kept;
-        } while (he.id != start.id);
-        // Including the closing transition permits a boundary fan that wraps around the start.
-        // Zero runs means the entire ambient ring is retained; one run is an interval link.
-        if (retained_runs > 1) {
-            return std::unexpected(ExpMapFailure::NonManifoldVertex);
-        }
+    if (patch.face_ids.size() != n_faces) {
+        return std::unexpected(ExpMapFailure::DisconnectedPatch);
     }
 
     // For a connected orientable 2-manifold, chi = 2 - 2g - b = 1 precisely for a disk.
@@ -145,6 +134,19 @@ validate_exp_map_patch(const Mesh& mesh,
     if (patch.n_vertices + n_faces != n_edges + 1) {
         return std::unexpected(ExpMapFailure::NotTopologicalDisk);
     }
+
+    assert(start_boundary_halfedge.valid());
+    patch.boundary_vertex_ids.reserve(n_boundary_edges);
+    auto boundary_halfedge = mesh.halfedge(start_boundary_halfedge);
+    do {
+        patch.boundary_vertex_ids.push_back(boundary_halfedge.from().id);
+        boundary_halfedge = boundary_halfedge.next();
+        while (kept_faces[boundary_halfedge.twin().face().id.idx]) {
+            boundary_halfedge = boundary_halfedge.twin().next();
+        }
+    } while (boundary_halfedge.id != start_boundary_halfedge && patch.boundary_vertex_ids.size() < n_boundary_edges);
+    assert(boundary_halfedge.id == start_boundary_halfedge);
+    assert(patch.boundary_vertex_ids.size() == n_boundary_edges);
     return patch;
 }
 
@@ -293,6 +295,7 @@ exp_map(const std::span<const double, 3> center_pt,
     ExpMapResult result;
     result.center_vertex = center_vertex;
     result.face_ids = std::move(patch->face_ids);
+    result.boundary_vertex_ids = std::move(patch->boundary_vertex_ids);
     // settled now marks only face-incident vertices, dropping dangling reached vertices without trimming faces.
     // mesh.vertices() yields active vertices in ascending ID order, establishing the public result ordering.
     result.vertex_ids.reserve(patch->n_vertices);

@@ -757,6 +757,18 @@ FlipGeodesic::shorten_locally()
         return true;
     }
 
+    const auto intrinsic_length = [this](const std::span<const gpf::HalfedgeId> path) {
+        double sum = 0.0;
+        double correction = 0.0;
+        for (const auto hid : path) {
+            const auto adjusted = mesh->halfedge(hid).edge().prop().len - correction;
+            const auto next_sum = sum + adjusted;
+            correction = (next_sum - sum) - adjusted;
+            sum = next_sum;
+        }
+        return sum;
+    };
+    const auto old_length = intrinsic_length(std::array{ path_prev_hid, path_next_hid });
     const auto path_prev_prev_hid = mesh->halfedge_prop(path_prev_hid).path_prev;
     const auto path_next_next_hid = mesh->halfedge_prop(path_next_hid).path_next;
 
@@ -794,6 +806,15 @@ FlipGeodesic::shorten_locally()
             hid = mesh->he_twin(hid);
         }
     }
+    const auto candidate_length = intrinsic_length(new_path);
+    static constexpr double kLengthToleranceFactor = 64.0;
+    const auto tolerance =
+      kLengthToleranceFactor * std::numeric_limits<double>::epsilon() * std::max(old_length, candidate_length);
+    // Angular eligibility does not guarantee a shorter replacement when flips are rejected.
+    if (!std::isfinite(old_length) || !std::isfinite(candidate_length) || old_length - candidate_length <= tolerance) {
+        return true;
+    }
+
     mesh->halfedge_prop(path_prev_hid).unconnect();
     mesh->halfedge_prop(path_next_hid).unconnect();
     replace_path(std::move(new_path), path_prev_prev_hid, path_next_next_hid);
