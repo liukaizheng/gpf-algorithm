@@ -33,6 +33,16 @@
 #include <gpf/triangulation.hpp>
 
 namespace gpf {
+enum class ProjectPolylinesOnMeshFailure
+{
+    PathNotFound,
+    InvalidTriangleIndex,
+    ConstraintConflict
+};
+
+using ProjectPolylinesOnMeshResult =
+  std::expected<std::pair<std::vector<VertexId>, std::vector<std::vector<HalfedgeId>>>, ProjectPolylinesOnMeshFailure>;
+
 enum class WalkOnMeshSurfaceFailure
 {
     BoundaryReached,
@@ -319,7 +329,7 @@ split_edge_by_points(Mesh& mesh,
 }
 
 template<std::size_t N, typename Mesh>
-void
+[[nodiscard]] std::expected<void, ProjectPolylinesOnMeshFailure>
 triangulate_on_face(Mesh& mesh,
                     const gpf::FaceId fid,
                     const std::span<const std::array<double, N>> all_points,
@@ -349,7 +359,7 @@ triangulate_on_face(Mesh& mesh,
     face_vertices.append_range(ranges::iota_view{ n_old_vertices, mesh.n_vertices_capacity() } |
                                views::transform([](const auto idx) { return gpf::VertexId{ idx }; }));
     if (face_vertices.size() == 3) {
-        return;
+        return {};
     }
     for (auto [pid, vid] : views::zip(
            point_indices, ranges::drop_view{ face_vertices, static_cast<std::ptrdiff_t>(n_old_face_vertices) })) {
@@ -376,6 +386,10 @@ triangulate_on_face(Mesh& mesh,
                           views::transform([&vertex_indices](const auto vid) { return vertex_indices[vid]; }));
 
     const auto triangle_indices = gpf::triangulate_polygon(points, segments, n_old_face_vertices, true);
+    if (std::ranges::any_of(triangle_indices,
+                            [&face_vertices](const auto index) { return index >= face_vertices.size(); })) {
+        return std::unexpected(ProjectPolylinesOnMeshFailure::InvalidTriangleIndex);
+    }
     auto triangles = triangle_indices |
                      views::transform([&face_vertices](const auto idx) { return face_vertices[idx]; }) |
                      ranges::to<std::vector>();
@@ -399,6 +413,7 @@ triangulate_on_face(Mesh& mesh,
             (*face_parent_map)[gpf::FaceId{ i }] = root_parent;
         }
     }
+    return {};
 }
 
 template<std::size_t N, typename Mesh>
@@ -475,7 +490,7 @@ prepare_projected_points(std::vector<std::array<double, N>>& points, Mesh& mesh,
 }
 
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
-auto
+[[nodiscard]] std::expected<std::vector<VertexId>, ProjectPolylinesOnMeshFailure>
 project_points_on_mesh(std::vector<std::array<double, N>>& points,
                        gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
                        const double eps,
@@ -506,16 +521,19 @@ project_points_on_mesh(std::vector<std::array<double, N>>& points,
     }
 
     for (const auto& [fid, info] : face_info_map) {
-        triangulate_on_face<N>(mesh,
-                               fid,
-                               std::span<const std::array<double, N>>{ points },
-                               info.ccs,
-                               info.point_indices,
-                               {},
-                               point_vertices,
-                               face_parent_map);
+        auto result = triangulate_on_face<N>(mesh,
+                                             fid,
+                                             std::span<const std::array<double, N>>{ points },
+                                             info.ccs,
+                                             info.point_indices,
+                                             {},
+                                             point_vertices,
+                                             face_parent_map);
+        if (!result) {
+            return std::unexpected(result.error());
+        }
     }
-    return point_vertices;
+    return std::move(point_vertices);
 }
 
 struct VertexProp
@@ -649,8 +667,8 @@ inline std::vector<gpf::HalfedgeId>
 FlipGeodesic::perform(std::vector<gpf::HalfedgeId>&& raw_path)
 {
     if (raw_path.size() == 1) {
-        assert(!mesh->halfedge(raw_path.back()).edge().prop().locked);
         assert(mesh->halfedge(raw_path.back()).edge().prop().is_origin);
+        mesh->halfedge(raw_path.back()).edge().prop().locked = true;
         return raw_path;
     }
     init_wedge_queue(raw_path);
@@ -1092,10 +1110,47 @@ TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double right_ori
 {
     auto he_ab = mesh->halfedge(hab);
     auto edge_point = make_edge_point<N>(*mesh, left_ori, right_ori, hab);
-    auto pid = this->edge_points.size();
     this->edge_points.push_back(std::move(edge_point));
-    this->path.emplace_back(pid);
+    this->path.emplace_back(this->edge_points.size() - 1);
     this->path_on_face_vec.emplace_back(he_ab.face().id);
+}
+
+template<std::size_t N, typename Mesh, typename GetVertexId>
+[[nodiscard]] std::expected<std::vector<HalfedgeId>, ProjectPolylinesOnMeshFailure>
+resolve_polyline_path(const Mesh& mesh,
+                      const std::span<const typename TracePolyline<N, Mesh>::Anchor> path,
+                      GetVertexId&& get_vertex_id)
+{
+    std::vector<HalfedgeId> halfedges;
+    halfedges.reserve(path.empty() ? 0 : path.size() - 1);
+    for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+        const auto va = get_vertex_id(path[i]);
+        const auto vb = get_vertex_id(path[i + 1]);
+        if (va == vb) {
+            continue;
+        }
+        auto hid = mesh.he_from_vertices(va, vb);
+        if (hid.valid()) {
+            halfedges.emplace_back(hid);
+        } else {
+            auto segment = shortest_patch_by_dijksta(
+              mesh,
+              va,
+              vb,
+              [](auto e) { return false; },
+              [](auto e) {
+                  auto [v1, v2] = e.vertices();
+                  const auto p1 = std::span<const double, N>(v1.prop().pt);
+                  const auto p2 = std::span<const double, N>(v2.prop().pt);
+                  return std::sqrt(gpf::squared_distance(p1, p2));
+              });
+            if (segment.empty()) {
+                return std::unexpected(ProjectPolylinesOnMeshFailure::PathNotFound);
+            }
+            halfedges.append_range(std::move(segment));
+        }
+    }
+    return halfedges;
 }
 
 [[nodiscard]] inline Vector2d
@@ -1396,8 +1451,9 @@ walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
     return walk(mesh, start_fid, start_pt, direction, eps);
 }
 
+// Failures retain earlier changes to the mesh, input points, and optional parent maps.
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
-auto
+[[nodiscard]] ProjectPolylinesOnMeshResult
 project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
                           const std::vector<std::vector<std::size_t>>& polylines,
                           gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
@@ -1407,7 +1463,11 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
 {
     using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
 
-    auto point_vertices = detail::project_points_on_mesh<N>(points, mesh, eps, face_parent_map, edge_parent_map);
+    auto projected_vertices = detail::project_points_on_mesh<N>(points, mesh, eps, face_parent_map, edge_parent_map);
+    if (!projected_vertices) {
+        return std::unexpected(projected_vertices.error());
+    }
+    auto point_vertices = std::move(*projected_vertices);
     mesh.update_vertex_halfedges();
 
     detail::AuxiliaryMesh aux_mesh;
@@ -1448,13 +1508,22 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
             if (va == vb) {
                 continue;
             }
-            auto local_path = flip_geodesic.perform(detail::shortest_patch_by_dijksta(
-              aux_mesh, va, vb, [](auto e) { return false; }, [](auto e) { return e.prop().len; }));
-            if (!local_path.empty()) {
-                for (const auto hid : std::move(local_path)) {
-                    trace.trace_from_vertex(hid);
+            auto raw_path = detail::shortest_patch_by_dijksta(
+              aux_mesh, va, vb, [](auto e) { return false; }, [](auto e) { return e.prop().len; });
+            if (raw_path.empty()) {
+                if (i + 1 == polyline.size()) {
+                    return std::unexpected(ProjectPolylinesOnMeshFailure::PathNotFound);
                 }
-                va = vb;
+            } else {
+                auto local_path = flip_geodesic.perform(std::move(raw_path));
+                if (!local_path.empty()) {
+                    for (const auto hid : std::move(local_path)) {
+                        trace.trace_from_vertex(hid);
+                    }
+                    va = vb;
+                } else if (i + 1 == polyline.size()) {
+                    return std::unexpected(ProjectPolylinesOnMeshFailure::ConstraintConflict);
+                }
             }
         }
         polyline_paths.push_back(std::move(trace.path));
@@ -1529,45 +1598,28 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
         const auto& ccs = ccs_and_segments.first;
         const auto& segments = ccs_and_segments.second;
         auto segment_vertices = segments | std::views::transform(get_vertex_id) | std::ranges::to<std::vector>();
-        detail::triangulate_on_face<N>(mesh,
-                                       fid,
-                                       std::span<const std::array<double, N>>{},
-                                       ccs,
-                                       {},
-                                       segment_vertices,
-                                       edge_point_vertices,
-                                       face_parent_map);
+        auto result = detail::triangulate_on_face<N>(mesh,
+                                                     fid,
+                                                     std::span<const std::array<double, N>>{},
+                                                     ccs,
+                                                     {},
+                                                     segment_vertices,
+                                                     edge_point_vertices,
+                                                     face_parent_map);
+        if (!result) {
+            return std::unexpected(result.error());
+        }
     }
 
-    return std::make_pair(std::move(point_vertices),
-                          std::move(polyline_paths) | std::views::transform([&get_vertex_id, &mesh](auto&& path) {
-                              std::vector<gpf::HalfedgeId> halfedges;
-                              halfedges.reserve(path.size() - 1);
-                              for (std::size_t i = 0; i + 1 < path.size(); ++i) {
-                                  const auto va = get_vertex_id(path[i]);
-                                  const auto vb = get_vertex_id(path[i + 1]);
-                                  if (va == vb) {
-                                      continue;
-                                  }
-                                  auto hid = mesh.he_from_vertices(va, vb);
-                                  if (hid.valid()) {
-                                      halfedges.emplace_back(hid);
-                                  } else {
-                                      halfedges.append_range(detail::shortest_patch_by_dijksta(
-                                        mesh,
-                                        va,
-                                        vb,
-                                        [](auto e) { return false; },
-                                        [](auto e) {
-                                            auto [v1, v2] = e.vertices();
-                                            const auto p1 = std::span<const double, N>(v1.prop().pt);
-                                            const auto p2 = std::span<const double, N>(v2.prop().pt);
-                                            return std::sqrt(gpf::squared_distance(p1, p2));
-                                        }));
-                                  }
-                              }
-                              return halfedges;
-                          }) |
-                            std::ranges::to<std::vector>());
+    std::vector<std::vector<HalfedgeId>> paths;
+    paths.reserve(polyline_paths.size());
+    for (const auto& path : polyline_paths) {
+        auto result = detail::resolve_polyline_path<N>(mesh, path, get_vertex_id);
+        if (!result) {
+            return std::unexpected(result.error());
+        }
+        paths.push_back(std::move(*result));
+    }
+    return std::make_pair(std::move(point_vertices), std::move(paths));
 }
 } // namespace gpf

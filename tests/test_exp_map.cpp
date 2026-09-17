@@ -157,7 +157,9 @@ test_exp_map()
     const std::size_t n_vertices_before = mesh.n_vertices();
     const std::size_t n_vertices_capacity_before = mesh.n_vertices_capacity();
     const std::array<double, 3> center_pt{ -0.23, 0.26, 0.93 };
-    const auto result = gpf::exp_map(center_pt, mesh, 2.7);
+    const auto exp_map_result = gpf::exp_map(center_pt, mesh, 2.7);
+    assert(exp_map_result.has_value());
+    const auto& result = *exp_map_result;
 
     assert(result.center_vertex.valid());
     assert(result.center_vertex.idx == n_vertices_capacity_before);

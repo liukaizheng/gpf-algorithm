@@ -30,6 +30,28 @@ test_property_edge_length_updates();
 void
 test_project_polylines_on_mesh_2d_points();
 void
+test_project_polylines_on_mesh_2d_success();
+void
+test_project_polylines_on_mesh_3d_success();
+void
+test_project_polylines_on_mesh_repeated_endpoints();
+void
+test_project_polylines_on_mesh_disconnected();
+void
+test_project_polylines_on_mesh_crossing_constraints();
+void
+test_project_polylines_on_mesh_initial_triangulation_failure();
+void
+test_resolve_polyline_path();
+void
+test_triangulate_on_face_noop();
+void
+test_triangulate_on_face_success();
+void
+test_triangulate_on_face_invalid_index_boundary();
+void
+test_triangulate_on_face_multiple_intersections();
+void
 test_prepare_projected_points_with_mbvh();
 void
 test_walk_on_mesh_surface();
@@ -63,6 +85,20 @@ int
 main()
 {
     test_encoded_array_iteration();
+    test_project_polylines_on_mesh_2d_success();
+    test_project_polylines_on_mesh_3d_success();
+    test_project_polylines_on_mesh_repeated_endpoints();
+    test_project_polylines_on_mesh_disconnected();
+    test_project_polylines_on_mesh_crossing_constraints();
+    test_project_polylines_on_mesh_initial_triangulation_failure();
+    test_resolve_polyline_path();
+    test_triangulate_on_face_noop();
+    test_triangulate_on_face_success();
+    test_triangulate_on_face_invalid_index_boundary();
+    test_triangulate_on_face_multiple_intersections();
+    test_project_polylines_on_mesh_2d_points();
+    test_prepare_projected_points_with_mbvh();
+    test_walk_on_mesh_surface();
     test_exp_map();
     // test_exp_map_planar_projection_is_isometric();
     // test_exp_map_existing_center_radius_and_components();
@@ -76,9 +112,6 @@ main()
     test_collapse_short_edges_2d_skips_flip();
     test_collapse_short_edges_2d_collapses();
     test_collapse_short_edges_2d_swaps_direction();
-    test_project_polylines_on_mesh_2d_points();
-    test_prepare_projected_points_with_mbvh();
-    test_walk_on_mesh_surface();
     test_mesh_edge_collapse1();
     test_triangulate_bug2();
     test_triangulate_bug1();

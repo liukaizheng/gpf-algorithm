@@ -25,11 +25,12 @@ namespace gpf {
 
 enum class ExpMapFailure
 {
-    EmptyPatch,        // No triangular faces qualify.
-    MissingCenter,     // No retained face is incident to the projected center.
-    DisconnectedPatch, // Retained faces are not connected through edges.
-    NonManifoldVertex, // A used vertex has separated retained face fans.
-    NotTopologicalDisk // The connected, vertex-manifold patch has Euler characteristic other than one.
+    EmptyPatch,         // No triangular faces qualify.
+    MissingCenter,      // No retained face is incident to the projected center.
+    DisconnectedPatch,  // Retained faces are not connected through edges.
+    NonManifoldVertex,  // A used vertex has separated retained face fans.
+    NotTopologicalDisk, // The connected, vertex-manifold patch has Euler characteristic other than one.
+    ProjectionFailed    // Center projection failed before updating its one-ring properties.
 };
 
 /// A nonempty, connected triangular topological disk in the post-projection source mesh.
@@ -179,8 +180,9 @@ update_exp_map_properties_around_vertex(Mesh& mesh, const VertexId center_vid)
 /// Requires a closed, orientable triangular manifold with valid geometry and initialized mesh-derived properties.
 /// Computes raw coordinates in mesh units with radius-controlled propagation, including the unconditional center
 /// one-ring and final frontier beyond the radius. Rejects the induced face patch unless it is a topological disk.
-/// Projection may insert the center; connectivity and properties are updated only in its one-ring, even on failure.
-/// Failures are nontransactional: mesh mutations are not rolled back. Properties outside the one-ring stay unchanged.
+/// Projection may insert the center and can fail before its one-ring properties are updated. After successful
+/// projection, those properties are updated even if patch validation fails. Properties outside the one-ring stay
+/// unchanged. Failures are nontransactional: mesh mutations are not rolled back.
 template<typename VP, typename HP, typename EP, typename FP>
     requires HasPositionProperty<VertexHandle<ManifoldMesh<VP, HP, EP, FP>, false>, 3> &&
              HasAngleSumProperty<VertexHandle<ManifoldMesh<VP, HP, EP, FP>, false>> &&
@@ -198,9 +200,12 @@ exp_map(const std::span<const double, 3> center_pt,
 
     // Projection reuses a nearby vertex or retriangulates the containing face around a newly inserted center.
     std::vector<std::array<double, 3>> center_points{ { center_pt[0], center_pt[1], center_pt[2] } };
-    const std::vector<gpf::VertexId> projected_vertices = detail::project_points_on_mesh<3>(center_points, mesh, 1e-3);
+    const auto projected_vertices = detail::project_points_on_mesh<3>(center_points, mesh, 1e-3);
+    if (!projected_vertices) {
+        return std::unexpected(ExpMapFailure::ProjectionFailed);
+    }
 
-    const gpf::VertexId center_vertex = projected_vertices.front();
+    const gpf::VertexId center_vertex = projected_vertices->front();
     detail::update_exp_map_properties_around_vertex(mesh, center_vertex);
 
     // Mesh IDs can contain gaps, so propagation state is indexed by storage capacity rather than active count.
