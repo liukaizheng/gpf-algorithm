@@ -1495,6 +1495,8 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
     std::vector<std::vector<gpf::FaceId>> path_segment_faces;
     polyline_paths.reserve(polylines.size());
     for (const auto polyline : polylines) {
+        const auto n_edge_points_before = edge_points.size();
+        bool terminal_failure = false;
         detail::TracePolyline<N, Mesh> trace{ .origin_signpost_angles{ origin_signpost_angles },
                                               .origin_edge_lengths{ origin_edge_lengths },
                                               .edge_points{ edge_points },
@@ -1512,7 +1514,7 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
               aux_mesh, va, vb, [](auto e) { return false; }, [](auto e) { return e.prop().len; });
             if (raw_path.empty()) {
                 if (i + 1 == polyline.size()) {
-                    return std::unexpected(ProjectPolylinesOnMeshFailure::PathNotFound);
+                    terminal_failure = true;
                 }
             } else {
                 auto local_path = flip_geodesic.perform(std::move(raw_path));
@@ -1522,9 +1524,15 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
                     }
                     va = vb;
                 } else if (i + 1 == polyline.size()) {
-                    return std::unexpected(ProjectPolylinesOnMeshFailure::ConstraintConflict);
+                    terminal_failure = true;
                 }
             }
+        }
+        if (terminal_failure) {
+            // Discard the entire trace while preserving earlier polylines' intersection points.
+            trace.path.clear();
+            trace.path_on_face_vec.clear();
+            edge_points.resize(n_edge_points_before);
         }
         polyline_paths.push_back(std::move(trace.path));
         path_segment_faces.push_back(std::move(trace.path_on_face_vec));

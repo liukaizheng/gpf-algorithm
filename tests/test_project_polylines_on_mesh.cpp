@@ -347,8 +347,11 @@ test_project_polylines_on_mesh_disconnected()
     std::unordered_map<gpf::EdgeId, gpf::EdgeId> edge_parent_map;
     const auto result =
       gpf::project_polylines_on_mesh<3>(points, { { 0, 1 } }, mesh, 1e-6, &face_parent_map, &edge_parent_map);
-    assert(!result.has_value());
-    assert(result.error() == gpf::ProjectPolylinesOnMeshFailure::PathNotFound);
+    assert(result.has_value());
+    const auto& [point_vertices, paths] = *result;
+    assert_point_vertices(mesh, points, point_vertices);
+    assert(paths.size() == 1);
+    assert(paths[0].empty());
     // Point projection and its parent-map changes remain after the disconnected route fails.
     assert(mesh.n_vertices() == 8);
     assert(mesh.n_faces() == 5);
@@ -385,11 +388,20 @@ test_project_polylines_on_mesh_crossing_constraints()
     std::unordered_map<gpf::EdgeId, gpf::EdgeId> edge_parent_map;
     const auto result =
       gpf::project_polylines_on_mesh<2>(points, polylines, mesh, 1e-6, &face_parent_map, &edge_parent_map);
-    assert(!result.has_value());
-    assert(result.error() == gpf::ProjectPolylinesOnMeshFailure::ConstraintConflict);
+    assert(result.has_value());
+    const auto& [point_vertices, paths] = *result;
+    assert_point_vertices(mesh, points, point_vertices);
+    assert(point_vertices == *projected_vertices);
+    assert(paths.size() == polylines.size());
+    assert_path(mesh, paths[0], point_vertices[6], point_vertices[3]);
+    assert(paths[1].empty());
+    assert_path(mesh, paths[2], point_vertices[7], point_vertices[9]);
+    assert(paths[3].empty());
     assert(points == positions);
-    assert(mesh.n_vertices() == positions.size());
-    assert(edge_parent_map.empty());
+    assert(mesh.n_vertices() == positions.size() + 4);
+    assert(mesh.n_faces() == faces.size() + 8);
+    assert(face_parent_map.size() == 12);
+    assert(edge_parent_map.size() == 7);
 }
 
 void
